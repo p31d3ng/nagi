@@ -52,11 +52,11 @@ struct ContentView:View {
                         if let session=j.sessions.first(where:{$0.id==j.selected}) {
                             HStack {Text(session.title).font(.title2.weight(.semibold));Spacer();Button(role:.destructive){deleteCandidate=session}label:{Image(systemName:"trash")}.disabled(j.recording)}
                             Text(session.device).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                            DisclosureGroup("Recording details"){Text(j.store.setting("metadata-"+session.id)+"\n"+j.store.setting("format-"+session.id)).font(.caption.monospaced()).textSelection(.enabled)}
-                            if !session.note.isEmpty {Label(session.note,systemImage:"info.circle").font(.callout).foregroundStyle(.secondary)}
+                            DisclosureGroup("Recording details"){Text(j.store.setting("metadata-"+session.id)+"\n"+j.store.setting("format-"+session.id)+"\nSpeaker labels, including Me, are estimates. Overlapping and distant voices may be missed.").font(.caption.monospaced()).textSelection(.enabled)}
+                            if !session.note.isEmpty {Label(session.note,systemImage:"info.circle").font(.callout).foregroundStyle(.secondary).lineLimit(2)}
                             Text(speakerSummary).font(.caption).foregroundStyle(accent)
                             let chunks=(try? j.store.chunks(session:session.id)) ?? []
-                            if let first=chunks.first {Text("Audio expires \(Date(timeIntervalSince1970:first.captured+172800).formatted()). Deletion runs when the app is awake; expired audio cannot play.").font(.caption).foregroundStyle(.secondary)}
+                            if let first=chunks.first {Text("Audio expires \(Date(timeIntervalSince1970:first.captured+172800).formatted()) · transcript retained.").font(.caption).foregroundStyle(.secondary)}
                             if chunks.contains(where:{$0.status=="failed" || $0.status=="needs_speakers"}) {Button("Retry failed processing",systemImage:"arrow.clockwise"){do{try j.processor.retry()}catch{j.error=error.localizedDescription}};ForEach(chunks.filter{$0.status=="failed" || $0.status=="needs_speakers"},id:\.id){chunk in Text((try? j.store.exec("SELECT error FROM chunks WHERE id=?",[chunk.id]).first?["error"]) ?? "Processing failed").font(.caption).foregroundStyle(.orange)}}
                         }
                         if j.segments.isEmpty {ContentUnavailableView(!j.query.isEmpty ? "No matching words":j.sessions.isEmpty ? "A quiet place for your conversations":j.selected==nil ? "Choose a conversation":"No transcript yet",systemImage:"waveform",description:Text(!j.query.isEmpty ? "Try another word or clear the speaker and language filters.":j.sessions.isEmpty ? "Choose your receiver in Devices, then start recording. You can also import a local audio file.":j.selected==nil ? "Select a recent conversation to review its transcript and playback.":"Audio chunks are durable. Processing status and recovery options appear above; silence has no transcript."))}
@@ -69,7 +69,7 @@ struct ContentView:View {
             }
         }.padding(28)
     }
-    var speakerSummary:String {let speakers=Set(j.segments.map(\.speaker).filter{!$0.hasPrefix("Unknown")});return speakers.isEmpty ? "Speaker count uncertain · labels need analysis or review":"Estimated \(speakers.count) speaker(s) · review labels, especially overlap and distant voices"}
+    var speakerSummary:String {let speakers=Set(j.segments.map(\.speaker).filter{!$0.hasPrefix("Unknown")});if speakers.isEmpty{return "Speaker count uncertain"};return j.segments.contains(where:{$0.speaker.hasPrefix("Unknown")}) ? "\(speakers.count) speaker label(s) · count uncertain":"Estimated \(speakers.count) speaker(s) · labels editable"}
     func time(_ offset:Double)->String {String(format:"%02d:%02d",Int(offset)/60,Int(offset)%60)}
     @ViewBuilder var settingsSection:some View {
         VStack(alignment:.leading,spacing:22){Text(section).font(.largeTitle.weight(.semibold))
@@ -101,8 +101,9 @@ struct ContentView:View {
                 Text("Rules apply after ASR to future jobs. They are case-sensitive and may replace substrings. Raw text and previous corrections are retained; use Undo or edit in the timeline.").font(.callout).foregroundStyle(.secondary)
             default:
                 Text("Audio and every derived audio copy expire 48 hours from capture. Original sample rate and channels are retained in losslessly gzip-compressed CAF chunks. The local data directory is excluded from backups where macOS supports it.").foregroundStyle(.secondary)
-                Toggle("Cap transcript text and correction history at 500 MB",isOn:$j.capEnabled)
-                Text("At the cap, the oldest whole conversations and their audio are evicted. This counts UTF-8 transcript text and correction history, not SQLite index/file overhead. Turn the cap off to keep transcripts until you delete them.").font(.callout).foregroundStyle(.secondary)
+                Toggle("Cap transcript text and correction history",isOn:$j.capEnabled)
+                HStack {TextField("Capacity in MB",text:$j.capMegabytes).frame(width:110).textFieldStyle(.roundedBorder);Text("MB · 1–10,000; default 500")}.disabled(!j.capEnabled)
+                Text("At the cap, the oldest whole conversations and their audio are evicted. This counts UTF-8 raw and displayed text, original decoder outputs and correction history, not SQLite index/file overhead. Turn the cap off to keep transcripts until you delete them.").font(.callout).foregroundStyle(.secondary)
                 Text(j.store.root.path).font(.caption.monospaced()).textSelection(.enabled)
                 Button("Run expiry cleanup now"){j.stopPlayback();j.processor.maintenance()}
                 Text("While the app or Mac is off, deletion cannot run. On startup and wake expired files are removed; playback is disabled once expiry passes. No uploads, account, or cloud endpoint is present.").font(.callout).foregroundStyle(.secondary)

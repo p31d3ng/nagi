@@ -29,6 +29,7 @@ import JournalCore
     @Published var preferredWords=""
     @Published var keepAwake=false
     @Published var capEnabled=true
+    @Published var capMegabytes="500"
     @Published var profileReady=false
     @Published var enrollment=false
     @Published var elapsed=0
@@ -46,6 +47,8 @@ import JournalCore
     private var lastMaintenance=Date()
     private var player:AVAudioPlayer?
     private var playbackURL:URL?
+    private var playbackChunkID:String?
+    private var playbackGeneration=0
     private let playbackLane=DispatchQueue(label:"stillpoint.playback",qos:.utility)
     init() {
         if let override=ProcessInfo.processInfo.environment["STILLPOINT_PROJECT"] {project=URL(fileURLWithPath:override)}
@@ -55,9 +58,17 @@ import JournalCore
         let data=URL(fileURLWithPath:ProcessInfo.processInfo.environment["STILLPOINT_DATA"] ?? defaultData.path)
         do {store=try Store(root:data);try Archive.recover(store);try store.cleanup(cap:Int(store.setting("cap",fallback:"500000000")) ?? 500000000);processor=try Processor(store:store,project:project)} catch {fatalError("Local store cannot open: \(error). Choose a writable STILLPOINT_DATA folder.")}
         inputUID=store.setting("inputUID");model=store.setting("model",fallback:"unified");preferredWords=store.setting("preferredWords");keepAwake=store.setting("keepAwake")=="true";capEnabled=store.setting("cap",fallback:"500000000") != "0"
+        let storedCap=Int(store.setting("cap",fallback:"500000000")) ?? 500000000
+        capMegabytes=store.setting("cap-limit-mb",fallback:storedCap>0 ? String(max(1,storedCap/1000000)):"500")
         if let data=store.setting("rules").data(using:.utf8),let rules=try? JSONDecoder().decode([Replacement].self,from:data) {rulesText=rules.map{$0.from+" => "+$0.to}.joined(separator:"\n")}
         devices=Devices.inputs();previousDevices=Set(devices.map(\.id));refresh()
-        processor.onStatus={ [weak self] status in DispatchQueue.main.async{self?.processing=status} }
+        processor.onStatus={ [weak self] status in DispatchQueue.main.async{
+            guard let self else{return};self.processing=status
+            if status.hasPrefix("Idle"),!self.recording,!self.playing,self.status.hasPrefix("Imported") {
+                let failures=((try? self.store.chunks(status:"failed",limit:1).isEmpty)==false) || ((try? self.store.chunks(status:"needs_speakers",limit:1).isEmpty)==false)
+                self.status=failures ? "Ready · processing needs review":"Ready · local processing complete"
+            }
+        } }
         processor.onChange={ [weak self] in DispatchQueue.main.async{self?.refresh()} }
         timer=Timer.scheduledTimer(withTimeInterval:2,repeats:true){[weak self] _ in Task{@MainActor in self?.tick()} }
         NSWorkspace.shared.notificationCenter.addObserver(forName:NSWorkspace.willSleepNotification,object:nil,queue:.main){[weak self] _ in Task{@MainActor in self?.stop(note:"System sleep gap. Resume explicitly after wake.")}}
@@ -78,12 +89,14 @@ import JournalCore
         previousDevices=ids
         if recording {elapsed=Int(Date().timeIntervalSince(started));if enrollment && elapsed>=20 {stop(note:"Voice enrollment sample")}}
         if playing && player?.isPlaying != true {stopPlayback()}
-        if let url=playbackURL,let chunk=try? store.chunks().first(where:{Archive.unpack($0,store:store)==url || Archive.readable($0,store:store)==url}),!store.audioAvailable(chunk){stopPlayback()}
+        if let id=playbackChunkID,let chunk=try? store.chunk(id),!store.audioAvailable(chunk){stopPlayback()}
     }
     func saveSettings() {
         do {
             guard !recording else {throw JournalError("Stop recording before changing input or model settings.")}
-            try store.set("inputUID",inputUID);try store.set("model",model);try store.set("keepAwake",String(keepAwake));try store.set("preferredWords",preferredWords);try store.set("cap",capEnabled ? "500000000":"0")
+            let cap=capEnabled ? try TranscriptCapacity.bytes(megabytes:capMegabytes):0
+            try store.set("cap-limit-mb",(try? TranscriptCapacity.bytes(megabytes:capMegabytes)) != nil ? capMegabytes:store.setting("cap-limit-mb",fallback:"500"))
+            try store.set("inputUID",inputUID);try store.set("model",model);try store.set("keepAwake",String(keepAwake));try store.set("preferredWords",preferredWords);try store.set("cap",String(cap))
             let rules=rulesText.split(separator:"\n").compactMap { line -> Replacement? in let parts=line.components(separatedBy:" => ");guard parts.count==2,!parts[0].isEmpty else{return nil};return Replacement(from:parts[0],to:parts[1]) }
             try store.set("rules",String(data:try JSONEncoder().encode(rules),encoding:.utf8)!)
             status="Settings saved locally";processor.maintenance()
@@ -103,7 +116,7 @@ import JournalCore
     private func begin(device:InputDevice,enroll:Bool) {
         do {
             started=Date();let id=try store.createSession(title:enroll ? "Voice profile enrollment" : "Conversation · "+Date().formatted(date:.abbreviated,time:.shortened),device:device.name+" | "+device.id,model:model)
-            try store.set("metadata-"+id,"engine=5d66f602;model=\(Models.all.first{$0.id==model}!.revision);threads=2;backend=metal;capture=original-rate CAF + gzip;vad=RMS 0.0001;language=script estimate;preferred=\(preferredWords);rules=\(store.setting("rules"));diarization=Community1/fc8c3e4")
+            try store.set("metadata-"+id,"engine=5d66f602;model=\(Models.all.first{$0.id==model}!.revision);threads=2;backend=metal;capture=original-rate CAF + gzip;vad=RMS 0.0001;language=script estimate;preferred=\(preferredWords);rules=\(store.setting("rules"));diarization=Community1/fc8c3e4 nonexclusive + precluster overlap; unified=streaming canonical / approximate offline times / 0.75s context / midpoint ownership; chunk=10s exact")
             try store.set("rules-"+id,store.setting("rules",fallback:"[]"))
             if enroll {try store.set("enrollment-session",id)}
             let writer=ChunkWriter(store:store,session:id,model:model)
@@ -128,7 +141,7 @@ import JournalCore
         status="Importing audio locally…"
         let store=store,model=model
         DispatchQueue.global(qos:.utility).async { [weak self] in
-            do {let id=try store.createSession(title:url.deletingPathExtension().lastPathComponent,device:"Imported local file",model:model);try store.set("rules-"+id,store.setting("rules",fallback:"[]"));try store.set("metadata-"+id,"Imported timestamp unknown; expiry starts at import. engine=5d66f602; model=\(model); threads=2; backend=Metal; sequential Community1; rules=\(store.setting("rules"))");let writer=ChunkWriter(store:store,session:id,model:model);try writer.importFile(url);try store.finish(id)
+            do {let id=try store.createSession(title:url.deletingPathExtension().lastPathComponent,device:"Imported local file",model:model);try store.set("rules-"+id,store.setting("rules",fallback:"[]"));try store.set("metadata-"+id,"Imported timestamp unknown; expiry starts at import. engine=5d66f602; model=\(model); threads=2; backend=Metal; sequential Community1 nonexclusive + precluster overlap; unified=streaming canonical / approximate offline times / 0.75s context; chunk=10s exact; rules=\(store.setting("rules"))");let writer=ChunkWriter(store:store,session:id,model:model);try writer.importFile(url);try store.finish(id)
                 DispatchQueue.main.async{self?.selected=id;self?.status="Imported · queued for local processing";self?.refresh();self?.processor.schedule()}
             }catch{DispatchQueue.main.async{self?.error=error.localizedDescription}}
         }
@@ -136,15 +149,15 @@ import JournalCore
     func play(_ segment:Segment) {
         guard !recording else {error="Finish recording before playback to avoid recording the speaker output.";return}
         stopPlayback()
-        guard let chunk=try? store.chunks().first(where:{$0.id==segment.chunk}),store.audioAvailable(chunk) else {error="Audio expired after 48 hours, or is missing. The transcript remains.";return}
-        status="Preparing playback…";let store=store
+        guard let chunk=try? store.chunk(segment.chunk),store.audioAvailable(chunk) else {error="Audio expired after 48 hours, or is missing. The transcript remains.";return}
+        status="Preparing playback…";let store=store,generation=playbackGeneration
         playbackLane.async { [weak self] in
             do {let url=try Archive.decompress(chunk,store:store)
-                DispatchQueue.main.async{guard let self else{return};do {self.player=try AVAudioPlayer(contentsOf:url);self.player?.currentTime=max(0,segment.offset-chunk.offset);self.player?.play();self.playbackURL=url;self.playing=true;self.status="Playing saved audio"}catch{self.error=error.localizedDescription}}
+                DispatchQueue.main.async{guard let self,self.playbackGeneration==generation,!self.recording,store.audioAvailable(chunk) else {if url.path.contains("/derived/"){try? FileManager.default.removeItem(at:url)};return};do {self.player=try AVAudioPlayer(contentsOf:url);self.player?.currentTime=max(0,segment.offset-chunk.offset);self.player?.play();self.playbackURL=url;self.playbackChunkID=chunk.id;self.playing=true;self.status="Playing saved audio"}catch{self.error=error.localizedDescription}}
             }catch{DispatchQueue.main.async{self?.error=error.localizedDescription}}
         }
     }
-    func stopPlayback(){player?.stop();player=nil;playing=false;if status=="Playing saved audio" || status=="Preparing playback…" {status="Ready · playback stopped"};if let url=playbackURL,url.path.contains("/derived/"){try? FileManager.default.removeItem(at:url)};playbackURL=nil}
+    func stopPlayback(){playbackGeneration+=1;playbackChunkID=nil;player?.stop();player=nil;playing=false;if status=="Playing saved audio" || status=="Preparing playback…" {status="Ready · playback stopped"};if let url=playbackURL,url.path.contains("/derived/"){try? FileManager.default.removeItem(at:url)};playbackURL=nil}
     func delete(_ session:Session){guard !recording else{error="Finish recording before deleting a session.";return};stopPlayback();status="Deleting conversation…";let processor=processor,store=store
         DispatchQueue.global(qos:.utility).async { [weak self] in processor.waitUntilIdle();do{try store.deleteSession(session.id);DispatchQueue.main.async{if self?.selected==session.id{self?.selected=nil};self?.status="Conversation deleted";self?.refresh()}}catch{DispatchQueue.main.async{self?.error=error.localizedDescription}}}
     }

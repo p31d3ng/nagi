@@ -26,7 +26,7 @@ Use **Import audio** to test with files without opening a microphone. Imported a
 ## Local behavior
 
 - Input selection persists the Core Audio device UID. No default-device fallback. Every captured buffer verifies the bound AudioUnit's device ID; a change/disappearance drops that buffer and stops capture. Device reconnection prompts for an explicit start. RX unplug and TX radio loss are different; digital silence cannot establish transmitter disconnection.
-- Continuous original-rate/channel Float32 CAF audio is sealed about every 10 seconds. Gzip preserves the CAF bytes exactly. Compression and ML run outside capture; at most 64 copied input buffers may await disk writing. Storage overload produces a visible stop/gap.
+- Continuous original-rate/channel Float32 CAF audio is sealed at exact ten-second frame boundaries, with a shorter final/recovered tail. Gzip preserves the CAF bytes exactly. Compression and ML run outside capture; at most 64 copied input buffers may await disk writing. Storage overload produces a visible stop/gap.
 - SQLite WAL, FULL synchronization, durable chunk states and a serial worker queue. Crashed processing jobs return to queued. Completed CAF chunks and readable open CAF tails recover on startup. The final tail can still be incomplete after an abrupt crash; recovery reports that honestly.
 - Exact **Parakeet Unified EN 0.6B Q8_0**, not TDT v3. Streaming API feeds use 320 ms blocks. Because the current upstream streaming API lacks word timing, a sequential offline pass supplies word alignment. Both raw streaming and aligned outputs are retained in SQLite. Timeline updates arrive after each durable chunk, not instant microphone token updates. The adapter uses the pinned public C API in a separate process; experimental Swift bindings were inspected but are not relied upon.
 - Selectable **Whisper Medium Q4_K_M** for Mandarin/Japanese and other languages. Switching is manual between sessions. Engine detected language is retained in `asr_runs`; UI tags deliberately use conservative script estimates/model assumptions and flag mixed/uncertain text.
@@ -34,7 +34,7 @@ Use **Import audio** to test with files without opening a microphone. Imported a
 - Preferred words are review hints. Exact case-sensitive replacement rules operate after ASR, with original and correction history retained and Undo available. Fuzzy correction/decode-time bias is not claimed.
 - Near digital silence skips ASR via an RMS threshold; continuous audio is preserved. Low noise can still reach ASR and hallucinate; noise fixtures are part of validation.
 - Audio expires 48 hours from each chunk's capture (or import) timestamp, including derived copies. Startup, wake and a minute maintenance tick remove expired audio. Playback is prohibited immediately after expiry. While the app/Mac is off, deletion cannot execute; the UI says so. The data directory is marked excluded from backup where supported. This is not secure erasure of SSD snapshots.
-- Transcripts persist until deletion or the optional 500 MB UTF-8 text/history cap. The cap evicts oldest finalized whole sessions and their audio; active capture is protected. SQLite/index/metadata overhead is separate. Recent sessions are bounded to 500; keyword search returns at most 2,000 rows per query. CJK queries use exact substring matching so short Mandarin/Japanese words remain searchable.
+- Transcripts persist until deletion or the optional configurable UTF-8 text/history cap (default 500 MB). The cap evicts oldest finalized whole sessions and their audio; active capture is protected. SQLite/index/metadata overhead is separate. Recent sessions are bounded to 500; keyword search returns at most 2,000 rows per query. CJK queries use exact substring matching so short Mandarin/Japanese words remain searchable.
 - Worker processes have networking denied and 180-second timeouts. Missing/corrupt models and speaker-analysis failures are recoverable through Retry. Speaker retries preserve raw/corrected text and correction history. There is no automatic cloud fallback.
 
 ## Test
@@ -45,6 +45,12 @@ SWIFTPM_MODULECACHE_OVERRIDE="$PWD/.cache/swift" \
 swift test --disable-sandbox --scratch-path .build --cache-path .cache -j 4
 python3 scripts/fixtures.py
 python3 scripts/verify.py
+python3 scripts/boundary.py
+# Production enqueue + write + sequential ML; synthetic input, never a microphone:
+python3 scripts/soak.py 1800 4
+python3 scripts/soak.py 300 1
+# Verify all archived samples against the generated source:
+python3 scripts/check-soak-audio.py reports/soak-<run-id>/Data
 # Optional full ten-minute synthetic processing stress run:
 python3 scripts/verify.py --stress
 ```
@@ -56,3 +62,13 @@ macOS TTS and Metal/Core ML need normal host access; restricted execution sandbo
 `JournalCore` owns storage, original-rate capture, compression, recovery and processing. `Native/ASRWorker.cpp` owns bounded ASR jobs. `SpeakerWorker` owns Community-1 inference. SwiftUI owns status/timeline, device/model/profile/dictionary/storage settings, search, review and playback. `SessionExporter` is the clean future Stage 2 boundary; no upload implementation exists.
 
 Stage 2 remains future work: configurable HTTPS endpoint, R2 retention, Workers AI summaries, D1 metadata, Keychain credentials and a durable upload retry queue. Nothing is deployed.
+
+## Hardening behavior
+
+Unified EN uses the requested streaming decoder as the canonical transcript. A separate offline pass estimates word times; exact-token alignment preserves the streaming words, and both raw outputs are retained. Each exact ten-second archive chunk gets up to 0.75 seconds of neighboring ASR context on each side; timestamp midpoint ownership selects displayed words without deleting legitimate repetitions by text. During recording this waits for the next sealed chunk, so updates can take about twenty seconds plus processing. Whisper keeps segment timing and currently does not use this word-context strategy. Recognition and timing errors remain possible.
+
+Community-1 emits nonexclusive turns. A separate bounded pass of the same pinned segmentation model retains pre-clustering powerset overlap hints, including when clustering collapses two voices into one identity. Hinted spans receive Unknown labels, overriding Me. This is an uncertainty detector, not source separation or a guaranteed speaker count; it may miss overlaps or flag solo speech incorrectly.
+
+Audio expiry runs on an independent queue while ML is busy. Derived audio has chunk ownership; context copies use the earliest source deadline. Worker TMPDIR is inside the journal, and startup removes crash-left temporary audio. Decompression consumers use separate files. Playback checks expiry and cancels interrupted preparation. Metadata retention uses indexed, bounded batches; expired empty paths can never be interpreted as the data root. All input channels contribute to level/VAD measurements, and ASR resampling explicitly enables downmixing.
+
+The transcript cap accepts 1–10,000 MB (default 500); turning it off keeps transcripts until deletion while audio still expires after 48 hours. See VERIFICATION.md for the 30-minute accelerated soak, real-time soak, boundary regressions, overlap failure/uncertainty handling and remaining multi-hour/hardware tests.

@@ -11,6 +11,7 @@ public final class Store: @unchecked Sendable {
     public let root: URL
     private var db: OpaquePointer?
     private let lock = NSRecursiveLock()
+    private let cleanupLock=NSLock()
     public init(root: URL) throws {
         self.root = root
         try FileManager.default.createDirectory(at: root.appendingPathComponent("audio"), withIntermediateDirectories: true)
@@ -31,6 +32,10 @@ public final class Store: @unchecked Sendable {
         try exec("CREATE TABLE IF NOT EXISTS asr_runs(chunk TEXT PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,streaming TEXT,aligned TEXT,language TEXT)")
         try exec("CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT)")
         try exec("CREATE TABLE IF NOT EXISTS speaker_vectors(session TEXT,label TEXT,embedding TEXT,PRIMARY KEY(session,label))")
+        try exec("CREATE INDEX IF NOT EXISTS chunks_queue ON chunks(status,captured,offset)")
+        try exec("CREATE INDEX IF NOT EXISTS chunks_neighbors ON chunks(session,offset)")
+        try exec("CREATE INDEX IF NOT EXISTS chunks_retention ON chunks(captured) WHERE status!='expired' OR path!=''")
+        try exec("CREATE INDEX IF NOT EXISTS segments_chunk ON segments(chunk)")
         try exec("CREATE TABLE IF NOT EXISTS profiles(id TEXT PRIMARY KEY,embedding TEXT,model TEXT,created REAL)")
     }
     deinit { sqlite3_close(db) }
@@ -79,9 +84,14 @@ public final class Store: @unchecked Sendable {
     private func readChunks(_ sql:String,_ values:[Any] = []) throws -> [Chunk] {
         return try exec(sql,values).map { Chunk(id:$0["id"]!,session:$0["session"]!,path:$0["path"]!,captured:Double($0["captured"]!)!,offset:Double($0["offset"]!)!,duration:Double($0["duration"]!)!,status:$0["status"]!,model:$0["model"]!) }
     }
-    public func segments(session:String? = nil,query:String = "",speaker:String = "",language:String = "") throws -> [Segment] {
+    public func chunksWithAudio() throws -> [Chunk] {try readChunks("SELECT * FROM chunks WHERE path!=''")}
+    public func chunk(_ id:String) throws -> Chunk? {try readChunks("SELECT * FROM chunks WHERE id=?",[id]).first}
+    public func neighbor(_ chunk:Chunk,before:Bool) throws -> Chunk? {
+        try readChunks("SELECT * FROM chunks WHERE session=? AND offset"+(before ? "<?":" >?")+" AND status!='writing' ORDER BY offset "+(before ? "DESC":"ASC")+" LIMIT 1",[chunk.session,chunk.offset]).first
+    }
+    public func segments(session:String? = nil,query:String = "",speaker:String = "",language:String = "",chunkID:String? = nil) throws -> [Segment] {
         var predicates:[String]=[]; var values:[Any]=[]
-        if let session { predicates.append("session=?"); values.append(session) }
+        if let session { predicates.append("session=?"); values.append(session) };if let chunkID {predicates.append("chunk=?");values.append(chunkID)}
         if !query.isEmpty {
             if query.unicodeScalars.contains(where:{$0.value>=0x3000}) {predicates.append("instr(corrected,?)>0");values.append(query)}
             else {predicates.append("id IN (SELECT rowid FROM search WHERE search MATCH ?)"); values.append("\""+query.replacingOccurrences(of:"\"",with:"\"\"")+"\"*")}
@@ -101,7 +111,13 @@ public final class Store: @unchecked Sendable {
         else { try exec("UPDATE segments SET corrected=raw WHERE id=?",[id]) }
     } }
     public func deleteSession(_ id:String) throws {
-        for chunk in try chunks(session:id) { let file=root.appendingPathComponent(chunk.path);if FileManager.default.fileExists(atPath:file.path) {try FileManager.default.removeItem(at:file)} }
+        for chunk in try readChunks("SELECT * FROM chunks WHERE session=? AND path!=''",[id]) {
+            if !chunk.path.isEmpty {let file=root.appendingPathComponent(chunk.path);if FileManager.default.fileExists(atPath:file.path) {try FileManager.default.removeItem(at:file)}}
+        }
+        for file in (try? FileManager.default.contentsOfDirectory(at:root.appendingPathComponent("derived"),includingPropertiesForKeys:nil)) ?? [] {
+            let owner=file.lastPathComponent.components(separatedBy:".").first ?? ""
+            if try chunk(owner)?.session==id {try FileManager.default.removeItem(at:file)}
+        }
         try exec("DELETE FROM speaker_vectors WHERE session=?",[id])
         try exec("DELETE FROM settings WHERE key IN (?,?,?)",["metadata-"+id,"rules-"+id,"format-"+id])
         try exec("DELETE FROM sessions WHERE id=?",[id])
@@ -109,14 +125,24 @@ public final class Store: @unchecked Sendable {
     /// Deletes audio and all temporary derivatives by the original capture timestamp.
     /// Expiry can only execute while the machine/app runs; expired playback is disabled separately.
     public func cleanup(now:Double = Date().timeIntervalSince1970,cap:Int = 500_000_000) throws -> Int {
+        cleanupLock.lock();defer{cleanupLock.unlock()}
         var removed=0
-        for chunk in try readChunks("SELECT * FROM chunks WHERE captured<=? AND (status!='expired' OR path!='')",[now-172800]) {
+        while true {
+            let batch=try readChunks("SELECT * FROM chunks WHERE captured<=? AND (status!='expired' OR path!='') LIMIT 128",[now-172800])
+            if batch.isEmpty {break}
+            for chunk in batch {
             let url=root.appendingPathComponent(chunk.path)
-            if FileManager.default.fileExists(atPath:url.path) { try FileManager.default.removeItem(at:url); removed += 1 }
+            if !chunk.path.isEmpty,FileManager.default.fileExists(atPath:url.path) { try FileManager.default.removeItem(at:url); removed += 1 }
             try exec("UPDATE chunks SET status='expired',path='' WHERE id=?",[chunk.id])
+            }
         }
         let derived = root.appendingPathComponent("derived")
-        for url in (try? FileManager.default.contentsOfDirectory(at:derived,includingPropertiesForKeys:nil)) ?? [] { try? FileManager.default.removeItem(at:url) }
+        for url in (try? FileManager.default.contentsOfDirectory(at:derived,includingPropertiesForKeys:nil)) ?? [] {
+            let owner=url.lastPathComponent.components(separatedBy:".").first ?? ""
+            let contextExpired=url.lastPathComponent.contains(".context.") && ((try? FileManager.default.attributesOfItem(atPath:url.path)[.modificationDate] as? Date)?.timeIntervalSince1970 ?? now)<=now-172800
+            if let ownerChunk=try chunk(owner),audioAvailable(ownerChunk,now:now),!contextExpired {continue}
+            try FileManager.default.removeItem(at:url)
+        }
         if cap > 0 {
             while let size=try exec("SELECT COALESCE(SUM(length(CAST(raw AS BLOB))+length(CAST(corrected AS BLOB))),0)+(SELECT COALESCE(SUM(length(CAST(text AS BLOB))),0) FROM versions)+(SELECT COALESCE(SUM(length(CAST(streaming AS BLOB))+length(CAST(aligned AS BLOB))),0) FROM asr_runs) AS bytes FROM segments").first?["bytes"], Int(size)! > cap, let oldest=try exec("SELECT id FROM sessions WHERE status != 'recording' ORDER BY started LIMIT 1").first?["id"] { try deleteSession(oldest) }
         }
@@ -136,4 +162,11 @@ public enum DictionaryCorrection {
 public enum VoiceMatch {
     public static func cosine(_ a:[Float],_ b:[Float])->Double { guard a.count == b.count,!a.isEmpty else { return -1 };let dot=zip(a,b).reduce(0.0){$0+Double($1.0*$1.1)}; let na=a.reduce(0.0){$0+Double($1*$1)};let nb=b.reduce(0.0){$0+Double($1*$1)};return na>0 && nb>0 ? dot/sqrt(na*nb) : -1 }
     public static func label(score:Double,runnerUp:Double,threshold:Double = 0.8)->String { score >= threshold && score-runnerUp >= 0.12 ? "Me" : "Unknown" }
+}
+
+public enum TranscriptCapacity {
+    public static func bytes(megabytes:String) throws -> Int {
+        guard let value=Int(megabytes),value>=1,value<=10000 else {throw JournalError("Choose a transcript cap from 1 to 10,000 MB, or turn the cap off to keep transcripts until deleted.")}
+        return value*1000000
+    }
 }

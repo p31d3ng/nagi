@@ -25,8 +25,9 @@ public enum Devices {
 
 public enum LocalProcess {
     /// No shell interpolation. Disk logs avoid pipe deadlocks and bounded output memory.
-    @discardableResult public static func run(_ executable:String,_ args:[String],log:URL? = nil,timeout:Double = 180) throws -> Int32 {
+    @discardableResult public static func run(_ executable:String,_ args:[String],log:URL? = nil,timeout:Double = 180,environment:[String:String] = [:]) throws -> Int32 {
         let p=Process();p.executableURL=URL(fileURLWithPath:executable);p.arguments=args;p.qualityOfService = .utility
+        if !environment.isEmpty {p.environment=ProcessInfo.processInfo.environment.merging(environment){_,new in new}}
         let logURL=log ?? FileManager.default.temporaryDirectory.appendingPathComponent("stillpoint-\(UUID().uuidString).log")
         FileManager.default.createFile(atPath:logURL.path,contents:nil);let handle=try FileHandle(forWritingTo:logURL);defer {try? handle.close();if log==nil {try? FileManager.default.removeItem(at:logURL)}}
         p.standardOutput=handle;p.standardError=handle;try p.run();let deadline=Date().addingTimeInterval(timeout)
@@ -39,7 +40,7 @@ public enum LocalProcess {
 public enum Archive {
     public static func readable(_ chunk:Chunk,store:Store)->URL { store.root.appendingPathComponent(chunk.path) }
     public static func unpack(_ chunk:Chunk,store:Store)->URL {
-        store.root.appendingPathComponent("derived/\(chunk.id).caf")
+        store.root.appendingPathComponent("derived/\(chunk.id).\(UUID().uuidString).caf")
     }
     public static func decompress(_ chunk:Chunk,store:Store) throws -> URL {
         guard store.audioAvailable(chunk) else {throw JournalError("Audio has expired or is missing. Its transcript is still available.")}
@@ -59,8 +60,10 @@ public enum Archive {
         try store.exec("UPDATE chunks SET path=? WHERE id=?",[chunk.path+".gz",chunk.id]);try FileManager.default.removeItem(at:source)
     }
     public static func recover(_ store:Store) throws {
-        try store.recover()
-        for chunk in try store.chunks() {
+        try store.recover();_ = try store.cleanup(cap:0)
+        // No worker/playback survives app startup; remove crash-left SDK temporary audio too.
+        for url in try FileManager.default.contentsOfDirectory(at:store.root.appendingPathComponent("derived"),includingPropertiesForKeys:nil) {try FileManager.default.removeItem(at:url)}
+        for chunk in try store.chunksWithAudio() {
             let source=readable(chunk,store:store)
             // Crash between compression rename, SQLite commit and original removal.
             if source.pathExtension == "caf",FileManager.default.fileExists(atPath:source.appendingPathExtension("gz").path) {
@@ -72,20 +75,56 @@ public enum Archive {
             }
         }
         // Remove only orphaned/completed temporary files in our audio directory.
-        let known=Set(try store.chunks().map(\.path))
+        let known=Set(try store.chunksWithAudio().map(\.path))
         for url in try FileManager.default.contentsOfDirectory(at:store.root.appendingPathComponent("audio"),includingPropertiesForKeys:nil) {
             let relative="audio/"+url.lastPathComponent
             if !known.contains(relative) {try? FileManager.default.removeItem(at:url)}
         }
     }
     public static func wav(_ source:URL,to dest:URL) throws {
-        try LocalProcess.run("/usr/bin/afconvert",[source.path,dest.path,"-f","WAVE","-d","LEI16@16000","-c","1"])
+        try LocalProcess.run("/usr/bin/afconvert",[source.path,dest.path,"-f","WAVE","-d","LEI16@16000","-c","1","--mix"])
+    }
+    /// Bounded ASR-only context; the original continuous archive has no overlap or omissions.
+    public static func context(_ chunk:Chunk,central:URL,to dest:URL,store:Store) throws -> Double {
+        var samples:[Float]=[];var lead=0.0;var captured=chunk.captured
+        func append(_ url:URL,tail:Bool?,seconds:Double=0.75) throws -> Int {
+            let f=try AVAudioFile(forReading:url);let n=tail==nil ? Int(f.length):min(Int(f.length),Int(seconds*16000))
+            if tail==true {f.framePosition=f.length-Int64(n)}
+            guard let b=AVAudioPCMBuffer(pcmFormat:f.processingFormat,frameCapacity:4096) else {throw JournalError("Cannot allocate bounded context")}
+            var read=0
+            while read<n {
+                try f.read(into:b,frameCount:AVAudioFrameCount(min(4096,n-read)))
+                guard b.frameLength>0 else {throw JournalError("Unexpected end of context audio")}
+                if let data=b.floatChannelData {samples.append(contentsOf:UnsafeBufferPointer(start:data[0],count:Int(b.frameLength)))}
+                read+=Int(b.frameLength)
+            }
+            return read
+        }
+        func adjacent(before:Bool) throws {
+            guard let other=try store.neighbor(chunk,before:before),store.audioAvailable(other),abs(before ? other.offset+other.duration-chunk.offset : chunk.offset+chunk.duration-other.offset)<0.002 else {return}
+            captured=min(captured,other.captured)
+            let source=try decompress(other,store:store),temporary=store.root.appendingPathComponent("derived/\(chunk.id).neighbor.wav")
+            defer {try? FileManager.default.removeItem(at:temporary);if source.path.contains("/derived/"){try? FileManager.default.removeItem(at:source)}}
+            try wav(source,to:temporary);let count=try append(temporary,tail:before)
+            if before {lead=Double(count)/16000}
+        }
+        try adjacent(before:true);_ = try append(central,tail:nil);try adjacent(before:false)
+        guard samples.count<=16000*12 else {throw JournalError("Context exceeds bounded ASR job")}
+        let format=AVAudioFormat(standardFormatWithSampleRate:16000,channels:1)!,buffer=AVAudioPCMBuffer(pcmFormat:format,frameCapacity:AVAudioFrameCount(samples.count))!
+        buffer.frameLength=buffer.frameCapacity;samples.withUnsafeBufferPointer{buffer.floatChannelData![0].update(from:$0.baseAddress!,count:$0.count)}
+        let floatURL=store.root.appendingPathComponent("derived/\(chunk.id).context.caf")
+        defer {try? FileManager.default.removeItem(at:floatURL)}
+        var output:AVAudioFile?=try AVAudioFile(forWriting:floatURL,settings:format.settings);try output!.write(from:buffer);output!.close();output=nil
+        try FileManager.default.setAttributes([.modificationDate:Date(timeIntervalSince1970:captured)],ofItemAtPath:floatURL.path)
+        try wav(floatURL,to:dest)
+        try FileManager.default.setAttributes([.modificationDate:Date(timeIntervalSince1970:captured)],ofItemAtPath:dest.path)
+        return lead
     }
     public static func rms(_ source:URL) throws -> Double {
         let file=try AVAudioFile(forReading:source);guard let buffer=AVAudioPCMBuffer(pcmFormat:file.processingFormat,frameCapacity:4096) else {return 0}
-        var sum=0.0,count=0
-        while file.framePosition<file.length {try file.read(into:buffer);if let data=buffer.floatChannelData {for i in 0..<Int(buffer.frameLength) {let v=Double(data[0][i]);sum += v*v;count += 1}}}
-        return count>0 ? sqrt(sum/Double(count)) : 0
+        var sums=[Double](repeating:0,count:Int(file.processingFormat.channelCount)),count=0
+        while file.framePosition<file.length {try file.read(into:buffer);if let data=buffer.floatChannelData {for channel in sums.indices {for i in 0..<Int(buffer.frameLength) {let v=Double(data[channel][i]);sums[channel] += v*v}};count+=Int(buffer.frameLength)}}
+        return count>0 ? sqrt((sums.max() ?? 0)/Double(count)) : 0
     }
 }
 
@@ -98,17 +137,33 @@ public final class ChunkWriter: @unchecked Sendable {
     public var onLevel:((Double)->Void)?;public var onError:((String)->Void)?;public var onChunk:(()->Void)?
     private var failed=false
     private var imported=false
+    private let admission=NSLock();private var stopped=false
     public init(store:Store,session:String,model:String,started:Double=Date().timeIntervalSince1970){self.store=store;self.session=session;self.model=model;self.started=started}
-    public func enqueue(_ buffer:AVAudioPCMBuffer) {
-        guard slots.wait(timeout:.now()) == .success else {onError?("Storage could not keep up; recording stopped with a gap.");return}
-        guard let copy=AVAudioPCMBuffer(pcmFormat:buffer.format,frameCapacity:buffer.frameLength) else {slots.signal();return}
+    @discardableResult public func enqueue(_ buffer:AVAudioPCMBuffer) -> Bool {
+        admission.lock();if stopped {admission.unlock();return false}
+        guard slots.wait(timeout:.now()) == .success else {stopped=true;admission.unlock();onError?("Storage could not keep up; recording stopped with a gap.");return false}
+        admission.unlock()
+        guard let copy=AVAudioPCMBuffer(pcmFormat:buffer.format,frameCapacity:buffer.frameLength) else {slots.signal();return false}
         copy.frameLength=buffer.frameLength
         let src=UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList),dst=UnsafeMutableAudioBufferListPointer(copy.mutableAudioBufferList)
         for i in 0..<src.count {if let a=src[i].mData,let b=dst[i].mData {memcpy(b,a,Int(src[i].mDataByteSize))}}
-        queue.async {defer{self.slots.signal()};do {try self.write(copy)}catch{self.failed=true;self.onError?(error.localizedDescription)}}
+        queue.async {defer{self.slots.signal()};do {try self.write(copy)}catch{self.failed=true;self.admission.lock();self.stopped=true;self.admission.unlock();self.onError?(error.localizedDescription)}}
+        return true
     }
     public func write(_ buffer:AVAudioPCMBuffer) throws {
         guard !failed else {return}
+        let target=Int64(buffer.format.sampleRate*10)
+        let remaining=target-(file==nil ? 0:frames)
+        if Int64(buffer.frameLength)>remaining {
+            // Split exactly at the original-rate frame boundary, never drop or repeat samples.
+            for (offset,count) in [(0,Int(remaining)),(Int(remaining),Int(buffer.frameLength)-Int(remaining))] {
+                let part=AVAudioPCMBuffer(pcmFormat:buffer.format,frameCapacity:AVAudioFrameCount(count))!;part.frameLength=part.frameCapacity
+                let src=UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList),dst=UnsafeMutableAudioBufferListPointer(part.mutableAudioBufferList)
+                for i in 0..<src.count {let stride=Int(src[i].mDataByteSize)/Int(buffer.frameLength);memcpy(dst[i].mData!,src[i].mData!.advanced(by:offset*stride),count*stride)}
+                try write(part)
+            }
+            return
+        }
         if file==nil {
             rate=buffer.format.sampleRate;try store.set("format-"+session,"\(rate) Hz · \(buffer.format.channelCount) channels · original Float32 CAF / gzip");let path="audio/\(UUID().uuidString).caf"
             chunkID=try store.registerChunk(session:session,path:path,captured:started+(imported ? 0:Double(total)/rate),offset:Double(total)/rate,model:model)
@@ -116,10 +171,10 @@ public final class ChunkWriter: @unchecked Sendable {
         }
         guard buffer.format.sampleRate==rate else {throw JournalError("Input format changed; finalize and start a new recording.")}
         try file!.write(from:buffer);frames += Int64(buffer.frameLength);total += Int64(buffer.frameLength)
-        if let data=buffer.floatChannelData {var sum=0.0;for i in 0..<Int(buffer.frameLength){sum += Double(data[0][i]*data[0][i])};onLevel?(sqrt(sum/max(1,Double(buffer.frameLength))))}
+        if let data=buffer.floatChannelData {var peak=0.0;for channel in 0..<Int(buffer.format.channelCount) {var sum=0.0;for i in 0..<Int(buffer.frameLength){sum += Double(data[channel][i]*data[channel][i])};peak=max(peak,sqrt(sum/max(1,Double(buffer.frameLength))))};onLevel?(peak)}
         if Double(frames)/rate>=10 {try closeChunk()}
     }
-    private func closeChunk() throws {guard file != nil else {return};let url=file!.url;file=nil;let handle=try FileHandle(forWritingTo:url);try handle.synchronize();try handle.close();try store.seal(chunkID,duration:Double(frames)/rate);onChunk?()}
+    private func closeChunk() throws {guard file != nil else {return};let url=file!.url;file!.close();file=nil;let handle=try FileHandle(forWritingTo:url);try handle.synchronize();try handle.close();try store.seal(chunkID,duration:Double(frames)/rate);onChunk?()}
     public func finish() throws {var thrown:Error?;queue.sync {do{try closeChunk()}catch{thrown=error}};if let thrown {throw thrown}}
     public func importFile(_ url:URL) throws {
         imported=true

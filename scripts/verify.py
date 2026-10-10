@@ -10,18 +10,29 @@ def run(args,name,expected=(0,)):
  return round(time.monotonic()-start,3)
 def connect(data):return sqlite3.connect(data/'journal.sqlite')
 result={}
-for name in ['english','mandarin','japanese','alternating','overlap','silence','noise']:
+worker=p/'.build/debug/SpeakerWorker'
+run([worker,p/'Fixtures/english.wav',output/'english-speakers.json',p/'Models/Community1'],'profile-enrollment')
+a=json.load(open(output/'english-speakers.json'));assert not a['overlaps']
+profile=next(iter(a['embeddings'].values()))
+run(['afconvert',p/'Fixtures/english.wav',output/'right-only.caf','-f','caff','-d','LEF32@48000','-c','2','-m','-1','0'],'right-only-fixture')
+for name in ['english','right-only','mandarin','japanese','alternating','overlap','silence','noise']:
  data=output/(name+'Data');result[name]={}
- result[name]['import_wall']=run([h,'import',data,p/'Fixtures'/f'{name}.wav'],name+'-import')
+ fixture=output/'right-only.caf' if name=='right-only' else p/'Fixtures'/f'{name}.wav'
+ result[name]['import_wall']=run([h,'import',data,fixture],name+'-import')
  if name in ('mandarin','japanese'):
   with connect(data) as db:db.execute("UPDATE chunks SET model='whisper'");db.execute("UPDATE sessions SET model='whisper'")
+ if name=='overlap':
+  with connect(data) as db:db.execute("INSERT INTO profiles VALUES('Me',?,'Community1/fc8c3e4',?)",(json.dumps(profile),time.time()))
  result[name]['process_wall']=run([h,'process',data,p],name+'-process')
  with connect(data) as db:
   counts=dict(db.execute('SELECT status,count(*) FROM chunks GROUP BY status'));text=' '.join(r[0] for r in db.execute('SELECT raw FROM segments ORDER BY offset'))
   result[name].update(statuses=counts,text=text,speakers=[r[0] for r in db.execute('SELECT DISTINCT speaker FROM segments')])
   assert not any(key in counts for key in ('failed','queued','processing','needs_speakers')),(name,counts)
+  if name=='overlap':
+   assert text and any('possible overlap' in r[0] for r in db.execute('SELECT speaker FROM segments'))
+   assert not list(db.execute("SELECT id FROM segments WHERE offset<5 AND end>0 AND speaker='Me'")), 'Detected overlap must override Me profile matching'
   if name=='silence':assert counts.get('silence',0)>0 and not text
-  if name=='english':assert 'journal' in text.lower()
+  if name in ('english','right-only'):assert 'journal' in text.lower()
   if name=='mandarin':assert '會議' in text or '会议' in text
   if name=='japanese':assert '会議' in text
 # Force death with an open original-rate CAF tail, then recover.
@@ -34,8 +45,6 @@ with connect(failure) as db:assert dict(db.execute('SELECT status,count(*) FROM 
 run([h,'process',failure,p],'failure-retry')
 with connect(failure) as db:assert set(r[0] for r in db.execute('SELECT status FROM chunks'))=={'done'}
 # Same-model synthetic profile discrimination, not a real-person accuracy claim.
-worker=p/'.build/debug/SpeakerWorker'
-run([worker,p/'Fixtures/english.wav',output/'english-speakers.json',p/'Models/Community1'],'profile-enrollment')
 run([worker,p/'Fixtures/alternating.wav',output/'alternating-speakers.json',p/'Models/Community1'],'profile-alternating')
 a=json.load(open(output/'english-speakers.json'));b=json.load(open(output/'alternating-speakers.json'))
 v=next(iter(a['embeddings'].values()))

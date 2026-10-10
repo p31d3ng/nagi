@@ -37,3 +37,6 @@ Dependencies/
 # Caches held temporarily during safe rebuilds
 .cache-*/
 .build-*/
+
+__pycache__/
+*.pyc

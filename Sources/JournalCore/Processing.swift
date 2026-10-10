@@ -5,7 +5,8 @@ public enum Models {
     public static let all:[ModelChoice] = [ModelChoice(id:"unified",name:"Parakeet Unified EN 0.6B",filename:"parakeet-unified-en-0.6b-Q8_0.gguf",revision:"7e948f21b7bdbac698d3318db9d350f1096f3b6c",checksum:"4b50b6dd862bf6e346929aaf4f5eaacec003bfa3f56462d6c874b41ef2f38795",languages:"English · Q8_0 · 697 MiB"),ModelChoice(id:"whisper",name:"Whisper Medium",filename:"whisper-medium-Q4_K_M.gguf",revision:"ec78f06fded51aa82cde751678b78f76f78c8b7f",checksum:"6c9cad9c41d1fa0fcc624898f7ee3485b66127627878081a5655c6f6f3ce20ab",languages:"Multilingual · Mandarin / Japanese · Q4_K_M")]
 }
 public struct SpeakerTurn:Codable {public let speaker:String;public let start:Double;public let end:Double}
-public struct SpeakerResult:Codable {public let turns:[SpeakerTurn];public let embeddings:[String:[Float]];public let elapsed:Double;public let model:String}
+public struct OverlapSpan:Codable {public let start:Double;public let end:Double}
+public struct SpeakerResult:Codable {public var overlaps:[OverlapSpan]?=nil;public let turns:[SpeakerTurn];public let embeddings:[String:[Float]];public let elapsed:Double;public let model:String}
 public struct ASRRow:Decodable {public let text:String;public let streaming_text:String?;public let language:String?;public let segments:[ASRSegment]?;public let error:String?}
 public struct ASRSegment:Decodable {public let t0_ms:Int;public let t1_ms:Int;public let text:String}
 
@@ -13,16 +14,34 @@ public struct ASRSegment:Decodable {public let t0_ms:Int;public let t1_ms:Int;pu
 public final class Processor: @unchecked Sendable {
     public let store:Store;public let project:URL
     private let lane=DispatchQueue(label:"stillpoint.processing",qos:.utility)
+    private let retentionLane=DispatchQueue(label:"nagi.audio.expiry",qos:.utility)
     private let state=NSLock();private var scheduled=false
+    private var lastCleanup=Date.distantPast
     public var onStatus:((String)->Void)?;public var onChange:(()->Void)?
     public init(store:Store,project:URL) throws {self.store=store;self.project=project;try store.exec("CREATE TABLE IF NOT EXISTS speaker_vectors(session TEXT,label TEXT,embedding TEXT,PRIMARY KEY(session,label))")}
-    public func schedule() {state.lock();guard !scheduled else {state.unlock();return};scheduled=true;state.unlock();lane.async {self.drain();self.state.lock();self.scheduled=false;self.state.unlock();if ((try? self.store.chunks(status:"queued",limit:1).isEmpty == false) ?? false) {self.schedule()}}}
-    public func maintenance() {lane.async {do {try self.store.cleanup(cap:Int(self.store.setting("cap",fallback:"500000000")) ?? 500000000);self.onChange?()}catch{self.onStatus?(error.localizedDescription)}}}
+    public func schedule() {state.lock();guard !scheduled else {state.unlock();return};scheduled=true;state.unlock();lane.async {self.drain();self.state.lock();self.scheduled=false;self.state.unlock();if (try? self.readyChunk()) != nil {self.schedule()}}}
+    public func maintenance() {
+        // Audio expiry is independent of a long-running ML job. Transcript eviction stays serial with ML.
+        retentionLane.async {do {try self.store.cleanup(cap:0);self.onChange?()}catch{self.onStatus?(error.localizedDescription)}}
+        lane.async {do {try self.store.cleanup(cap:Int(self.store.setting("cap",fallback:"500000000")) ?? 500000000);self.onChange?()}catch{self.onStatus?(error.localizedDescription)}}
+    }
     public func waitUntilIdle() {lane.sync{}}
     public func retry() throws {try store.exec("UPDATE chunks SET status='queued',error='' WHERE status IN ('failed','needs_speakers')");schedule()}
+    private func readyChunk() throws -> Chunk? {
+        guard let chunk=try store.chunks(status:"queued",limit:1).first else {return nil}
+        if !store.audioAvailable(chunk) {return chunk}
+        if chunk.model=="unified",store.setting("enrollment-session") != chunk.session,
+           try store.exec("SELECT status FROM sessions WHERE id=?",[chunk.session]).first?["status"]=="recording",
+           try store.exec("SELECT id FROM chunks WHERE session=? AND offset>? AND status!='writing' LIMIT 1",[chunk.session,chunk.offset]).isEmpty {
+            return nil // Wait for bounded look-ahead; finishing the session releases the final chunk.
+        }
+        return chunk
+    }
     private func drain() {
         do {
-            while let chunk=try store.chunks(status:"queued",limit:1).first {
+            while let chunk=try readyChunk() {
+                // A continuous backlog must not starve retention behind the drain loop.
+                if Date().timeIntervalSince(lastCleanup)>=60 {try store.cleanup(cap:Int(store.setting("cap",fallback:"500000000")) ?? 500000000);lastCleanup=Date()}
                 guard store.audioAvailable(chunk) else {try store.exec("UPDATE chunks SET status='expired' WHERE id=?",[chunk.id]);continue}
                 do {try process(chunk)} catch {try store.exec("UPDATE chunks SET status='failed',error=? WHERE id=?",[error.localizedDescription,chunk.id]);onStatus?("Needs attention: \(error.localizedDescription)")}
                 onChange?()
@@ -33,7 +52,11 @@ public final class Processor: @unchecked Sendable {
     private func process(_ original:Chunk) throws {
         try store.exec("UPDATE chunks SET status='processing' WHERE id=?",[original.id]);onStatus?("Compressing · recording continues independently")
         try Archive.compress(original,store:store)
-        guard let chunk=try store.chunks().first(where:{$0.id==original.id}) else {return}
+        guard let chunk=try store.chunk(original.id) else {return}
+        let temporary=store.root.appendingPathComponent("derived/\(chunk.id).work")
+        try FileManager.default.createDirectory(at:temporary,withIntermediateDirectories:true)
+        let workerEnvironment=["TMPDIR":temporary.path+"/"]
+        defer {try? FileManager.default.removeItem(at:temporary)}
         let source=try Archive.decompress(chunk,store:store);let wav=store.root.appendingPathComponent("derived/\(chunk.id).wav");let list=store.root.appendingPathComponent("derived/\(chunk.id).list");let log=store.root.appendingPathComponent("derived/\(chunk.id).asr.log");let diarized=store.root.appendingPathComponent("derived/\(chunk.id).speakers.json")
         defer {for url in [wav,list,log,diarized,source] where url.path.contains("/derived/"){try? FileManager.default.removeItem(at:url)}}
         let rms=try Archive.rms(source)
@@ -45,7 +68,7 @@ public final class Processor: @unchecked Sendable {
         guard FileManager.default.fileExists(atPath:modelURL.path) else {throw JournalError("Install \(model.name) in Models, then Retry")}
         let isEnrollment=store.setting("enrollment-session")==chunk.session
         var asr:ASRRow?=nil
-        let existing=try store.segments(session:chunk.session).filter{$0.chunk==chunk.id}
+        let existing=try store.segments(session:chunk.session,chunkID:chunk.id)
         if !existing.isEmpty {
             asr=ASRRow(text:existing.map(\.raw).joined(separator:" "),streaming_text:nil,language:nil,segments:existing.map{ASRSegment(t0_ms:Int(($0.offset-chunk.offset)*1000),t1_ms:Int(($0.end-chunk.offset)*1000),text:$0.raw)},error:nil)
         }
@@ -54,17 +77,27 @@ public final class Processor: @unchecked Sendable {
             let executable=project.appendingPathComponent("bin/ASRWorker")
             let resultURL=store.root.appendingPathComponent("derived/\(chunk.id).asr.json")
             defer {try? FileManager.default.removeItem(at:resultURL)}
-            try LocalProcess.run("/usr/bin/sandbox-exec",["-p","(version 1)(allow default)(deny network*)",executable.path,modelURL.path,wav.path,resultURL.path],log:log,timeout:180)
-            asr=try JSONDecoder().decode(ASRRow.self,from:Data(contentsOf:resultURL));if let error=asr?.error {throw JournalError("ASR: "+error)}
+            let contextual=store.root.appendingPathComponent("derived/\(chunk.id).context.wav")
+            defer {try? FileManager.default.removeItem(at:contextual)}
+            let lead=chunk.model=="unified" ? try Archive.context(chunk,central:wav,to:contextual,store:store) : 0
+            let input=chunk.model=="unified" ? contextual:wav
+            let remaining=chunk.captured+172800-Date().timeIntervalSince1970-(lead>0 ? 10:0)
+            guard remaining>0 else {throw JournalError("Audio context expired; its transcript remains")}
+            try LocalProcess.run("/usr/bin/sandbox-exec",["-p","(version 1)(allow default)(deny network*)",executable.path,modelURL.path,input.path,resultURL.path],log:log,timeout:min(180,remaining),environment:workerEnvironment)
+            let raw=try JSONDecoder().decode(ASRRow.self,from:Data(contentsOf:resultURL));if let error=raw.error {throw JournalError("ASR: "+error)}
+            asr=ASRRow(text:raw.text,streaming_text:raw.streaming_text,language:raw.language,segments:raw.segments.map{Self.ownedRows(chunk.model=="unified" ? Self.streamingRows($0,text:raw.streaming_text ?? ""):$0,lead:lead,duration:chunk.duration)},error:nil)
         }
         onStatus?("Finding speakers · Community-1")
         let speakerWorker=project.appendingPathComponent(".build/debug/SpeakerWorker")
         let models=project.appendingPathComponent("Models/Community1")
         var speakers:SpeakerResult?
         do {
-            try LocalProcess.run("/usr/bin/sandbox-exec",["-p","(version 1)(allow default)(deny network*)",speakerWorker.path,wav.path,diarized.path,models.path],log:log,timeout:180)
+            let remaining=chunk.captured+172800-Date().timeIntervalSince1970
+            guard remaining>0 else {throw JournalError("Audio expired; its transcript remains")}
+            try LocalProcess.run("/usr/bin/sandbox-exec",["-p","(version 1)(allow default)(deny network*)",speakerWorker.path,wav.path,diarized.path,models.path],log:log,timeout:min(180,remaining),environment:workerEnvironment)
             speakers=try JSONDecoder().decode(SpeakerResult.self,from:Data(contentsOf:diarized))
             try store.exec("UPDATE sessions SET note='' WHERE id=? AND note LIKE 'Speaker analysis unavailable:%'",[chunk.session])
+            if !(speakers?.overlaps ?? []).isEmpty {try store.exec("UPDATE sessions SET note=? WHERE id=?",["Possible overlapping voices detected. Their ASR text is preserved with Unknown labels; quieter speech may still be omitted.",chunk.session])}
         }catch {
             if isEnrollment {throw error}
             if error.localizedDescription.contains("No speech detected in audio") {
@@ -73,7 +106,7 @@ public final class Processor: @unchecked Sendable {
             } else {try store.exec("UPDATE sessions SET note=? WHERE id=?",["Speaker analysis unavailable: \(error.localizedDescription). Labels remain Unknown.",chunk.session])}
         }
         if isEnrollment {
-            guard chunk.duration>=8,let speakers,speakers.embeddings.count==1,let embedding=speakers.embeddings.values.first,!embedding.isEmpty else {throw JournalError("Enrollment needs one clear voice. Please retry alone in a quiet room.")}
+            guard chunk.duration>=8,let speakers,speakers.embeddings.count==1,!SpeakerAttribution.hasOverlap(speakers.turns),(speakers.overlaps ?? []).isEmpty,let embedding=speakers.embeddings.values.first,!embedding.isEmpty else {throw JournalError("Enrollment needs one clear voice. Please retry alone in a quiet room.")}
             let encoded=String(data:try JSONEncoder().encode(embedding),encoding:.utf8)!
             try store.exec("INSERT OR REPLACE INTO profiles VALUES('Me',?,'Community1/fc8c3e4',?)",[encoded,Date().timeIntervalSince1970])
             try store.exec("UPDATE chunks SET status='done' WHERE id=?",[chunk.id]);return
@@ -81,20 +114,13 @@ public final class Processor: @unchecked Sendable {
         let labels=try mapSpeakers(speakers?.embeddings ?? [:],session:chunk.session)
         let rulesData=Data(store.setting("rules-"+chunk.session,fallback:store.setting("rules",fallback:"[]")).utf8);let rules=(try? JSONDecoder().decode([Replacement].self,from:rulesData)) ?? []
         guard let asr else {throw JournalError("ASR unavailable")}
-        let rows=asr.segments?.isEmpty==false ? asr.segments! : [ASRSegment(t0_ms:0,t1_ms:Int(chunk.duration*1000),text:asr.text)]
+        let rows=asr.segments ?? [ASRSegment(t0_ms:0,t1_ms:Int(chunk.duration*1000),text:asr.text)]
         try store.transaction {
             if existing.isEmpty {try store.exec("INSERT OR REPLACE INTO asr_runs VALUES(?,?,?,?)",[chunk.id,asr.streaming_text ?? "",asr.text,asr.language ?? "uncertain"])}
             var grouped:[(start:Double,end:Double,text:String,label:String,language:String)] = []
             for row in rows {
                 let start=Double(row.t0_ms)/1000,end=Double(row.t1_ms)/1000
-                let turns=speakers?.turns.filter {min(end,$0.end)>max(start,$0.start)} ?? []
-                let ranked=turns.sorted {min(end,$0.end)-max(start,$0.start)>min(end,$1.end)-max(start,$1.start)}
-                var label="Unknown"
-                if let turn=ranked.first {
-                    let duration=max(0.01,end-start);let fraction=(min(end,turn.end)-max(start,turn.start))/duration
-                    if fraction>=0.7 {label=labels[turn.speaker] ?? "Unknown"}
-                    else if ranked.count>1 {label="Unknown · mixed speakers"}
-                }
+                let label=SpeakerAttribution.label(start:start,end:end,turns:speakers?.turns ?? [],labels:labels,overlaps:speakers?.overlaps ?? [])
                 let language=Self.language(row.text,model:chunk.model)
                 if let last=grouped.last,last.label==label,last.language==language,end-last.start<8,start-last.end<1 {
                     let index=grouped.count-1;grouped[index].end=max(end,last.end);grouped[index].text += row.text.hasPrefix(" ") ? row.text : " "+row.text
@@ -106,8 +132,8 @@ public final class Processor: @unchecked Sendable {
             if !existing.isEmpty {
                 for old in existing where old.speaker.hasPrefix("Unknown") {
                     let start=old.offset-chunk.offset,end=old.end-chunk.offset
-                    let turns=speakers?.turns.filter{min(end,$0.end)>max(start,$0.start)} ?? []
-                    if let best=turns.max(by:{min(end,$0.end)-max(start,$0.start)<min(end,$1.end)-max(start,$1.start)}),(min(end,best.end)-max(start,best.start))/max(0.01,end-start)>=0.7,let label=labels[best.speaker] {try store.exec("UPDATE segments SET speaker=? WHERE id=?",[label,old.id])}
+                    let label=SpeakerAttribution.label(start:start,end:end,turns:speakers?.turns ?? [],labels:labels,overlaps:speakers?.overlaps ?? [])
+                    if !label.hasPrefix("Unknown") {try store.exec("UPDATE segments SET speaker=? WHERE id=?",[label,old.id])}
                 }
             }
             try store.exec("UPDATE chunks SET status=?,error=? WHERE id=?",[speakers==nil ? "needs_speakers":"done",speakers==nil ? "Speaker analysis unavailable. Retry preserves transcript corrections.":"",chunk.id])
@@ -130,6 +156,36 @@ public final class Processor: @unchecked Sendable {
         }
         return result
     }
+    /// The requested streaming decoder is canonical. The separate alignment pass estimates times;
+    /// it must not introduce its own boundary hallucinations into the streaming transcript.
+    public static func streamingRows(_ aligned:[ASRSegment],text:String)->[ASRSegment] {
+        let tokens=text.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard !tokens.isEmpty else {return aligned}
+        guard tokens.count<=512,aligned.count<=512 else {return aligned}
+        func key(_ value:String)->String {String(value.lowercased().unicodeScalars.filter{CharacterSet.alphanumerics.contains($0)})}
+        let a=tokens.map(key),b=aligned.map{key($0.text)},n=a.count,m=b.count
+        var dp=Array(repeating:Array(repeating:0,count:m+1),count:n+1)
+        if n>0,m>0 {for i in stride(from:n-1,through:0,by:-1) {for j in stride(from:m-1,through:0,by:-1) {dp[i][j]=a[i]==b[j] ? dp[i+1][j+1]+1:max(dp[i+1][j],dp[i][j+1])}}}
+        var matched:[Int:Int]=[:],i=0,j=0
+        while i<n,j<m {if a[i]==b[j] {matched[i]=j;i+=1;j+=1} else if dp[i+1][j]>=dp[i][j+1] {i+=1} else {j+=1}}
+        return tokens.enumerated().map {index,token in
+            if let match=matched[index] {return ASRSegment(t0_ms:aligned[match].t0_ms,t1_ms:aligned[match].t1_ms,text:token)}
+            let prior=matched.keys.filter{$0<index}.max(),next=matched.keys.filter{$0>index}.min()
+            let lower=prior.map{aligned[matched[$0]!].t1_ms} ?? 0
+            let upper=max(lower,next.map{aligned[matched[$0]!].t0_ms} ?? max(lower+100,aligned.last?.t1_ms ?? 100))
+            let first=(prior ?? -1)+1,last=(next ?? n)-1,count=max(1,last-first+1)
+            let start=lower+(upper-lower)*(index-first)/count,end=lower+(upper-lower)*(index-first+1)/count
+            return ASRSegment(t0_ms:start,t1_ms:end,text:token)
+        }
+    }
+    /// Timestamp ownership, not textual deduplication: legitimate repeated words survive.
+    public static func ownedRows(_ rows:[ASRSegment],lead:Double,duration:Double)->[ASRSegment] {
+        rows.compactMap {row in
+            let start=Double(row.t0_ms)/1000-lead,end=Double(row.t1_ms)/1000-lead,mid=(start+end)/2
+            guard mid>=0,mid<duration else {return nil}
+            return ASRSegment(t0_ms:Int(max(0,start)*1000),t1_ms:Int(min(duration,max(start,end))*1000),text:row.text)
+        }
+    }
     public static func language(_ text:String,model:String)->String {
         let hasKana=text.unicodeScalars.contains{(0x3040...0x30ff).contains($0.value)}
         let hasHan=text.unicodeScalars.contains{(0x4e00...0x9fff).contains($0.value)}
@@ -140,3 +196,25 @@ public final class Processor: @unchecked Sendable {
 }
 // Future Stage 2 can implement this interface. No network implementation is shipped.
 public protocol SessionExporter {func export(sessionID:String,store:Store) async throws}
+
+public enum SpeakerAttribution {
+    public static func hasOverlap(_ turns:[SpeakerTurn])->Bool {
+        for (i,a) in turns.enumerated() {for b in turns.dropFirst(i+1) where a.speaker != b.speaker {
+            if min(a.end,b.end)-max(a.start,b.start)>0.03 {return true}
+        }}
+        return false
+    }
+    public static func label(start:Double,end:Double,turns:[SpeakerTurn],labels:[String:String],overlaps:[OverlapSpan]=[])->String {
+        if overlaps.contains(where:{min(end,$0.end)>max(start,$0.start)}) {return "Unknown · possible overlap"}
+        let clipped=turns.compactMap {turn -> SpeakerTurn? in
+            let a=max(start,turn.start),b=min(end,turn.end)
+            return b>a ? SpeakerTurn(speaker:turn.speaker,start:a,end:b):nil
+        }
+        if hasOverlap(clipped) {return "Unknown · overlapping speakers"}
+        let totals=Dictionary(grouping:clipped,by: \.speaker).mapValues{$0.reduce(0.0){$0+$1.end-$1.start}}
+        let ranked=totals.sorted{$0.value>$1.value}
+        if ranked.count>1,ranked[1].value/max(0.01,end-start)>0.1 {return "Unknown · mixed speakers"}
+        if let best=ranked.first,best.value/max(0.01,end-start)>=0.7 {return labels[best.key] ?? "Unknown"}
+        return ranked.count>1 ? "Unknown · mixed speakers":"Unknown"
+    }
+}
