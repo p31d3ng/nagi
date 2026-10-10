@@ -6,7 +6,21 @@ export SWIFTPM_MODULECACHE_OVERRIDE="$project/.cache/swift"
 "$project/scripts/build-native.sh"
 swift build --disable-sandbox --package-path "$project" --scratch-path "$project/.build" --cache-path "$project/.cache" -j 4
 app="$project/build/Nagi.app"
-mkdir -p "$app/Contents/MacOS"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/Runtime/bin" "$app/Contents/Resources/Runtime/.build/debug"
+cp "$project/bin/ASRWorker" "$app/Contents/Resources/Runtime/bin/ASRWorker"
+cp "$project/.build/debug/SpeakerWorker" "$app/Contents/Resources/Runtime/.build/debug/SpeakerWorker"
+cp "$project/THIRD_PARTY_NOTICES.md" "$project/DEPENDENCIES.json" "$app/Contents/Resources/"
+mkdir -p "$app/Contents/Resources/Licenses"
+cp "$project/../Dependencies/transcribe.cpp/LICENSE" "$app/Contents/Resources/Licenses/transcribe.cpp.txt"
+cp "$project/../Dependencies/FluidAudio/LICENSE" "$app/Contents/Resources/Licenses/FluidAudio.txt"
+cp "$project/../Dependencies/transcribe.cpp/ggml/LICENSE" "$app/Contents/Resources/Licenses/ggml.txt"
+cp "$project/../Dependencies/transcribe.cpp/src/third_party/miniz/LICENSE" "$app/Contents/Resources/Licenses/miniz.txt"
+cp "$project/../Dependencies/transcribe.cpp/src/third_party/silero_vad/LICENSE" "$app/Contents/Resources/Licenses/silero-vad.txt"
+cp -R "$project/../Dependencies/FluidAudio/ThirdPartyLicenses" "$app/Contents/Resources/Licenses/"
+if [[ -d "$project/Models" ]]; then
+  mkdir -p "$app/Contents/Resources/Runtime/Models"
+  rsync -a "$project/Models/" "$app/Contents/Resources/Runtime/Models/"
+fi
 cp "$project/.build/debug/Nagi" "$app/Contents/MacOS/Nagi"
 /usr/bin/python3 - "$app/Contents/Info.plist" "$project" <<'PY'
 import plistlib,sys

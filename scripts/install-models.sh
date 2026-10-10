@@ -17,3 +17,5 @@ fetch handy-computer/parakeet-unified-en-0.6b-gguf 7e948f21b7bdbac698d3318db9d35
 fetch handy-computer/whisper-medium-gguf ec78f06fded51aa82cde751678b78f76f78c8b7f whisper-medium-Q4_K_M.gguf 6c9cad9c41d1fa0fcc624898f7ee3485b66127627878081a5655c6f6f3ce20ab
 [[ -f "$project/Fixtures/english.wav" ]] || python3 "$project/scripts/fixtures.py"
 "$project/.build/debug/SpeakerWorker" "$project/Fixtures/english.wav" "$project/reports/setup-speakers.json" "$project/Models/Community1" --prepare
+
+"$project/scripts/build.sh"

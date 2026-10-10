@@ -15,9 +15,9 @@ Requirements: Apple Silicon Mac, macOS 15+, Xcode with Swift 6.2+, CMake, Python
 open build/Nagi.app
 ```
 
-Source dependencies live in the sibling `../Dependencies` directory. Bootstrap refuses to overwrite a different existing checkout. Build uses workspace caches and four compiler jobs. The generated app embeds the current project path; rebuild after moving the project. Worker binaries and weights stay outside the app bundle in this development layout.
+Source dependencies live in the sibling `../Dependencies` directory. Bootstrap refuses to overwrite a different existing checkout. Build uses workspace caches and four compiler jobs. The generated app bundles runtime helpers and any installed models. After model installation, the setup script rebuilds the local app. App bundles and weights remain Git-ignored; no model weights are pushed to the source repository.
 
-On the original Studio, the complete project is `/Users/pei.deng/Documents/Codex/2026-10-10/task/Nagi`, and the app is `build/Nagi.app`. Local journal state is in `LocalData`; override `STILLPOINT_DATA` to use a separate test data folder and `STILLPOINT_PROJECT` to override the project path. These legacy environment keys remain supported internally.
+On the original Studio, the complete project is `/Users/pei.deng/Documents/Codex/2026-10-10/task/Nagi`, and the app is `build/Nagi.app`. Local journal state is in `~/Library/Application Support/Nagi`; override `STILLPOINT_DATA` to use a separate test data folder and `STILLPOINT_PROJECT` to override the project path. These legacy environment keys remain supported internally.
 
 Choose your receiver in **Devices**, save settings, and explicitly press **Start recording**. macOS microphone permission is requested only then. Closing the window leaves the menu-bar app alive; use its Open journal action to return. Quit stops and finalizes capture. Locking the screen does not intentionally stop capture. System sleep finalizes and marks a gap; recording must be restarted after wake. Optional idle-sleep prevention applies only while recording.
 
@@ -34,7 +34,7 @@ Use **Import audio** to test with files without opening a microphone. Imported a
 - Preferred words are review hints. Exact case-sensitive replacement rules operate after ASR, with original and correction history retained and Undo available. Fuzzy correction/decode-time bias is not claimed.
 - Near digital silence skips ASR via an RMS threshold; continuous audio is preserved. Low noise can still reach ASR and hallucinate; noise fixtures are part of validation.
 - Audio expires 48 hours from each chunk's capture (or import) timestamp, including derived copies. Startup, wake and a minute maintenance tick remove expired audio. Playback is prohibited immediately after expiry. While the app/Mac is off, deletion cannot execute; the UI says so. The data directory is marked excluded from backup where supported. This is not secure erasure of SSD snapshots.
-- Transcripts persist until deletion or the optional 500 MB UTF-8 text/history cap. The cap evicts oldest finalized whole sessions and their audio; active capture is protected. SQLite/index/metadata overhead is separate. Recent sessions are bounded to 500; keyword search returns at most 2,000 rows per query.
+- Transcripts persist until deletion or the optional 500 MB UTF-8 text/history cap. The cap evicts oldest finalized whole sessions and their audio; active capture is protected. SQLite/index/metadata overhead is separate. Recent sessions are bounded to 500; keyword search returns at most 2,000 rows per query. CJK queries use exact substring matching so short Mandarin/Japanese words remain searchable.
 - Worker processes have networking denied and 180-second timeouts. Missing/corrupt models and speaker-analysis failures are recoverable through Retry. Speaker retries preserve raw/corrected text and correction history. There is no automatic cloud fallback.
 
 ## Test

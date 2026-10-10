@@ -48,8 +48,11 @@ import JournalCore
     private var playbackURL:URL?
     private let playbackLane=DispatchQueue(label:"stillpoint.playback",qos:.utility)
     init() {
-        project=URL(fileURLWithPath:ProcessInfo.processInfo.environment["STILLPOINT_PROJECT"] ?? Bundle.main.object(forInfoDictionaryKey:"NagiProject") as? String ?? FileManager.default.currentDirectoryPath)
-        let data=URL(fileURLWithPath:ProcessInfo.processInfo.environment["STILLPOINT_DATA"] ?? project.appendingPathComponent("LocalData").path)
+        if let override=ProcessInfo.processInfo.environment["STILLPOINT_PROJECT"] {project=URL(fileURLWithPath:override)}
+        else if let resources=Bundle.main.resourceURL,FileManager.default.fileExists(atPath:resources.appendingPathComponent("Runtime/bin/ASRWorker").path) {project=resources.appendingPathComponent("Runtime")}
+        else {project=URL(fileURLWithPath:FileManager.default.currentDirectoryPath)}
+        let defaultData=FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask).first!.appendingPathComponent("Nagi")
+        let data=URL(fileURLWithPath:ProcessInfo.processInfo.environment["STILLPOINT_DATA"] ?? defaultData.path)
         do {store=try Store(root:data);try Archive.recover(store);try store.cleanup(cap:Int(store.setting("cap",fallback:"500000000")) ?? 500000000);processor=try Processor(store:store,project:project)} catch {fatalError("Local store cannot open: \(error). Choose a writable STILLPOINT_DATA folder.")}
         inputUID=store.setting("inputUID");model=store.setting("model",fallback:"unified");preferredWords=store.setting("preferredWords");keepAwake=store.setting("keepAwake")=="true";capEnabled=store.setting("cap",fallback:"500000000") != "0"
         if let data=store.setting("rules").data(using:.utf8),let rules=try? JSONDecoder().decode([Replacement].self,from:data) {rulesText=rules.map{$0.from+" => "+$0.to}.joined(separator:"\n")}
@@ -131,6 +134,7 @@ import JournalCore
         }
     }
     func play(_ segment:Segment) {
+        guard !recording else {error="Finish recording before playback to avoid recording the speaker output.";return}
         stopPlayback()
         guard let chunk=try? store.chunks().first(where:{$0.id==segment.chunk}),store.audioAvailable(chunk) else {error="Audio expired after 48 hours, or is missing. The transcript remains.";return}
         status="Preparing playback…";let store=store
@@ -140,7 +144,7 @@ import JournalCore
             }catch{DispatchQueue.main.async{self?.error=error.localizedDescription}}
         }
     }
-    func stopPlayback(){player?.stop();player=nil;playing=false;if let url=playbackURL,url.path.contains("/derived/"){try? FileManager.default.removeItem(at:url)};playbackURL=nil}
+    func stopPlayback(){player?.stop();player=nil;playing=false;if status=="Playing saved audio" || status=="Preparing playback…" {status="Ready · playback stopped"};if let url=playbackURL,url.path.contains("/derived/"){try? FileManager.default.removeItem(at:url)};playbackURL=nil}
     func delete(_ session:Session){guard !recording else{error="Finish recording before deleting a session.";return};stopPlayback();status="Deleting conversation…";let processor=processor,store=store
         DispatchQueue.global(qos:.utility).async { [weak self] in processor.waitUntilIdle();do{try store.deleteSession(session.id);DispatchQueue.main.async{if self?.selected==session.id{self?.selected=nil};self?.status="Conversation deleted";self?.refresh()}}catch{DispatchQueue.main.async{self?.error=error.localizedDescription}}}
     }
