@@ -1,0 +1,11 @@
+# Third-party notices
+
+Nagi does not redistribute model weights in its source repository. Read the model cards and terms before downloading or redistributing weights. No assertion that an app's MIT license applies to model weights is made.
+
+- [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp), pinned in DEPENDENCIES.json: MIT. Its [LICENSE](https://github.com/handy-computer/transcribe.cpp/blob/5d66f60257a75e9bdbddc72dc0887b32e9d4841a/LICENSE) and third-party notices apply. The adapter uses the public C API. Swift bindings were inspected but are marked in development; Nagi does not rely on them.
+- [FluidAudio](https://github.com/FluidInference/FluidAudio), pinned in DEPENDENCIES.json: Apache-2.0. Its [LICENSE](https://github.com/FluidInference/FluidAudio/blob/fc8c3e4f5103bf63a242453566525272e143a054/LICENSE) applies. Its binary artifact dependencies retain their own notices.
+- **Parakeet Unified EN 0.6B**: NVIDIA original model; handy-computer GGUF conversion. CC-BY-4.0 in [Handy v0.9.6's exact catalog](https://github.com/cjpais/Handy/blob/v0.9.6/src-tauri/src/catalog/catalog.json). [Model card](https://huggingface.co/handy-computer/parakeet-unified-en-0.6b-gguf). Q8_0 is 731,357,568 bytes (697.48 MiB). This is not Parakeet TDT v3.
+- **Whisper Medium GGUF**: OpenAI original model; handy-computer conversion. Separate model terms, catalogued as Apache-2.0. [Model card](https://huggingface.co/handy-computer/whisper-medium-gguf).
+- **Community-1 offline diarization conversion**: [FluidInference speaker-diarization-coreml](https://huggingface.co/FluidInference/speaker-diarization-coreml), based on pyannote Community-1 and WeSpeaker, with CC-BY-4.0 model notices. Give attribution to pyannote, WeSpeaker and FluidInference when redistributing these models; consult the pinned model card for complete upstream attribution.
+
+No Handy UI/app source, Mimika app code, or Pocket TTS ASR integration is copied. Fixtures use installed Apple macOS synthetic voices; the fixture generation script is source, and generated audio is excluded from Git.

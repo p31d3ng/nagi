@@ -1,0 +1,39 @@
+# Audio, biometric profiles and local state must never enter source control.
+Models/
+Fixtures/
+LocalData/
+*Data/
+reports/
+*.sqlite*
+*.db
+*.aiff
+*.aif
+*.wav
+*.caf*
+*.mp3
+*.m4a
+*.flac
+*.gguf
+*.mlmodel*
+*.npy
+*.npz
+*.rttm
+# Build/download products
+.build/
+.cache/
+.swiftpm/
+build/
+bin/
+Dependencies/
+*.log
+*.partial
+.DS_Store
+# Secrets and local overrides
+.env*
+*.pem
+*.key
+*.p12
+*.mobileprovision
+# Caches held temporarily during safe rebuilds
+.cache-*/
+.build-*/

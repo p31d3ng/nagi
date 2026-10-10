@@ -1,0 +1,165 @@
+import SwiftUI
+import AppKit
+import AVFoundation
+import IOKit.pwr_mgt
+import JournalCore
+
+@MainActor final class AppDelegate:NSObject,NSApplicationDelegate {
+    static var stop: (() -> Void)?
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender:NSApplication)->Bool {false}
+    func applicationShouldTerminate(_ sender:NSApplication)->NSApplication.TerminateReply { Self.stop?();return .terminateNow }
+}
+@MainActor final class Journal:ObservableObject {
+    @Published var sessions:[Session]=[]
+    @Published var selected:String?
+    @Published var segments:[Segment]=[]
+    @Published var devices:[InputDevice]=[]
+    @Published var inputUID=""
+    @Published var model="unified"
+    @Published var status="Ready · choose an input"
+    @Published var processing="Idle · audio stays on this Mac"
+    @Published var recording=false
+    @Published var level=0.0
+    @Published var error:String?
+    @Published var connectionPrompt=false
+    @Published var query=""
+    @Published var speakerFilter=""
+    @Published var languageFilter=""
+    @Published var rulesText=""
+    @Published var preferredWords=""
+    @Published var keepAwake=false
+    @Published var capEnabled=true
+    @Published var profileReady=false
+    @Published var enrollment=false
+    @Published var elapsed=0
+    @Published var playing=false
+    let project:URL
+    let store:Store
+    let processor:Processor
+    private let capture=Capture()
+    private var writer:ChunkWriter?
+    private var timer:Timer?
+    private var sessionID:String?
+    private var started=Date()
+    private var assertion:IOPMAssertionID=0
+    private var previousDevices=Set<String>()
+    private var lastMaintenance=Date()
+    private var player:AVAudioPlayer?
+    private var playbackURL:URL?
+    private let playbackLane=DispatchQueue(label:"stillpoint.playback",qos:.utility)
+    init() {
+        project=URL(fileURLWithPath:ProcessInfo.processInfo.environment["STILLPOINT_PROJECT"] ?? Bundle.main.object(forInfoDictionaryKey:"NagiProject") as? String ?? FileManager.default.currentDirectoryPath)
+        let data=URL(fileURLWithPath:ProcessInfo.processInfo.environment["STILLPOINT_DATA"] ?? project.appendingPathComponent("LocalData").path)
+        do {store=try Store(root:data);try Archive.recover(store);try store.cleanup(cap:Int(store.setting("cap",fallback:"500000000")) ?? 500000000);processor=try Processor(store:store,project:project)} catch {fatalError("Local store cannot open: \(error). Choose a writable STILLPOINT_DATA folder.")}
+        inputUID=store.setting("inputUID");model=store.setting("model",fallback:"unified");preferredWords=store.setting("preferredWords");keepAwake=store.setting("keepAwake")=="true";capEnabled=store.setting("cap",fallback:"500000000") != "0"
+        if let data=store.setting("rules").data(using:.utf8),let rules=try? JSONDecoder().decode([Replacement].self,from:data) {rulesText=rules.map{$0.from+" => "+$0.to}.joined(separator:"\n")}
+        devices=Devices.inputs();previousDevices=Set(devices.map(\.id));refresh()
+        processor.onStatus={ [weak self] status in DispatchQueue.main.async{self?.processing=status} }
+        processor.onChange={ [weak self] in DispatchQueue.main.async{self?.refresh()} }
+        timer=Timer.scheduledTimer(withTimeInterval:2,repeats:true){[weak self] _ in Task{@MainActor in self?.tick()} }
+        NSWorkspace.shared.notificationCenter.addObserver(forName:NSWorkspace.willSleepNotification,object:nil,queue:.main){[weak self] _ in Task{@MainActor in self?.stop(note:"System sleep gap. Resume explicitly after wake.")}}
+        NSWorkspace.shared.notificationCenter.addObserver(forName:NSWorkspace.didWakeNotification,object:nil,queue:.main){[weak self] _ in Task{@MainActor in self?.stopPlayback();self?.processor.maintenance();self?.status="Awake · recording needs an explicit start"}}
+        NotificationCenter.default.addObserver(forName:Notification.Name("NagiQuit"),object:nil,queue:.main){[weak self] _ in Task{@MainActor in self?.stop(note:"App quit")} }
+        AppDelegate.stop={ [weak self] in self?.stop(note:"App quit") }
+        processor.schedule()
+    }
+    func refresh() {
+        do {sessions=try store.sessions();segments=try store.segments(session:query.isEmpty ? selected:nil,query:query,speaker:speakerFilter,language:languageFilter);profileReady = !(try store.exec("SELECT id FROM profiles")).isEmpty}
+        catch {self.error=error.localizedDescription}
+    }
+    func tick() {
+        if Date().timeIntervalSince(lastMaintenance)>=60 {lastMaintenance=Date();processor.maintenance()}
+        let current=Devices.inputs();let ids=Set(current.map(\.id));devices=current
+        if recording && !ids.contains(inputUID){stop(note:"Selected receiver disappeared. No fallback microphone was used.");error="Selected input disconnected. Your recorded chunks are saved. Reconnect it and start a new session."}
+        if !recording,!inputUID.isEmpty,ids.contains(inputUID),!previousDevices.contains(inputUID){connectionPrompt=true;status="Selected input connected · ready to start"}
+        previousDevices=ids
+        if recording {elapsed=Int(Date().timeIntervalSince(started));if enrollment && elapsed>=20 {stop(note:"Voice enrollment sample")}}
+        if playing && player?.isPlaying != true {stopPlayback()}
+        if let url=playbackURL,let chunk=try? store.chunks().first(where:{Archive.unpack($0,store:store)==url || Archive.readable($0,store:store)==url}),!store.audioAvailable(chunk){stopPlayback()}
+    }
+    func saveSettings() {
+        do {
+            guard !recording else {throw JournalError("Stop recording before changing input or model settings.")}
+            try store.set("inputUID",inputUID);try store.set("model",model);try store.set("keepAwake",String(keepAwake));try store.set("preferredWords",preferredWords);try store.set("cap",capEnabled ? "500000000":"0")
+            let rules=rulesText.split(separator:"\n").compactMap { line -> Replacement? in let parts=line.components(separatedBy:" => ");guard parts.count==2,!parts[0].isEmpty else{return nil};return Replacement(from:parts[0],to:parts[1]) }
+            try store.set("rules",String(data:try JSONEncoder().encode(rules),encoding:.utf8)!)
+            status="Settings saved locally";processor.maintenance()
+        }catch{self.error=error.localizedDescription}
+    }
+    func start(enroll:Bool=false) {
+        guard !recording else{return}
+        guard let device=devices.first(where:{$0.id==inputUID}) else {error="Choose a connected input device in Devices. Recording never falls back to another microphone.";return}
+        enrollment=enroll
+        let begin={ [weak self] in Task{@MainActor in self?.begin(device:device,enroll:enroll)} }
+        switch AVCaptureDevice.authorizationStatus(for:.audio) {
+        case .authorized:begin()
+        case .notDetermined:AVCaptureDevice.requestAccess(for:.audio){[weak self] allowed in if allowed{begin()}else{DispatchQueue.main.async{self?.error="Microphone permission was declined. Enable Nagi in System Settings → Privacy & Security → Microphone, then try again."}}}
+        default:error="Microphone access is unavailable. Enable Nagi in System Settings → Privacy & Security → Microphone."
+        }
+    }
+    private func begin(device:InputDevice,enroll:Bool) {
+        do {
+            started=Date();let id=try store.createSession(title:enroll ? "Voice profile enrollment" : "Conversation · "+Date().formatted(date:.abbreviated,time:.shortened),device:device.name+" | "+device.id,model:model)
+            try store.set("metadata-"+id,"engine=5d66f602;model=\(Models.all.first{$0.id==model}!.revision);threads=2;backend=metal;capture=original-rate CAF + gzip;vad=RMS 0.0001;language=script estimate;preferred=\(preferredWords);rules=\(store.setting("rules"));diarization=Community1/fc8c3e4")
+            try store.set("rules-"+id,store.setting("rules",fallback:"[]"))
+            if enroll {try store.set("enrollment-session",id)}
+            let writer=ChunkWriter(store:store,session:id,model:model)
+            writer.onLevel={ [weak self] level in DispatchQueue.main.async{self?.level=min(1,level*8)} }
+            writer.onError={ [weak self] error in DispatchQueue.main.async{self?.stop(note:"Capture gap: "+error);self?.error=error} }
+            writer.onChunk={ [weak self] in self?.processor.schedule() }
+            do {try capture.start(device:device,writer:writer)} catch {try store.finish(id,note:"Could not start: \(error.localizedDescription)");throw error}
+            self.writer=writer;sessionID=id;selected=id;recording=true;enrollment=enroll;elapsed=0;status="Recording · "+device.name
+            if keepAwake {IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,IOPMAssertionLevel(kIOPMAssertionLevelOn),"Nagi recording" as CFString,&assertion)}
+            refresh()
+        }catch{self.error=error.localizedDescription;enrollment=false}
+    }
+    func stop(note:String="") {
+        guard recording else{return};recording=false;enrollment=false
+        do {try capture.stop();if let id=sessionID {try store.finish(id,note:note)}}catch{self.error=error.localizedDescription}
+        writer=nil;sessionID=nil;level=0;status=note.isEmpty ? "Saved · ready for another conversation":note
+        if assertion != 0 {IOPMAssertionRelease(assertion);assertion=0};processor.schedule();refresh()
+    }
+    func importAudio() {
+        let panel=NSOpenPanel();panel.allowedContentTypes=[.audio];guard panel.runModal() == .OK,let url=panel.url else{return}
+        guard !recording else{error="Finish recording before importing.";return}
+        status="Importing audio locally…"
+        let store=store,model=model
+        DispatchQueue.global(qos:.utility).async { [weak self] in
+            do {let id=try store.createSession(title:url.deletingPathExtension().lastPathComponent,device:"Imported local file",model:model);try store.set("rules-"+id,store.setting("rules",fallback:"[]"));try store.set("metadata-"+id,"Imported timestamp unknown; expiry starts at import. engine=5d66f602; model=\(model); threads=2; backend=Metal; sequential Community1; rules=\(store.setting("rules"))");let writer=ChunkWriter(store:store,session:id,model:model);try writer.importFile(url);try store.finish(id)
+                DispatchQueue.main.async{self?.selected=id;self?.status="Imported · queued for local processing";self?.refresh();self?.processor.schedule()}
+            }catch{DispatchQueue.main.async{self?.error=error.localizedDescription}}
+        }
+    }
+    func play(_ segment:Segment) {
+        stopPlayback()
+        guard let chunk=try? store.chunks().first(where:{$0.id==segment.chunk}),store.audioAvailable(chunk) else {error="Audio expired after 48 hours, or is missing. The transcript remains.";return}
+        status="Preparing playback…";let store=store
+        playbackLane.async { [weak self] in
+            do {let url=try Archive.decompress(chunk,store:store)
+                DispatchQueue.main.async{guard let self else{return};do {self.player=try AVAudioPlayer(contentsOf:url);self.player?.currentTime=max(0,segment.offset-chunk.offset);self.player?.play();self.playbackURL=url;self.playing=true;self.status="Playing saved audio"}catch{self.error=error.localizedDescription}}
+            }catch{DispatchQueue.main.async{self?.error=error.localizedDescription}}
+        }
+    }
+    func stopPlayback(){player?.stop();player=nil;playing=false;if let url=playbackURL,url.path.contains("/derived/"){try? FileManager.default.removeItem(at:url)};playbackURL=nil}
+    func delete(_ session:Session){guard !recording else{error="Finish recording before deleting a session.";return};stopPlayback();status="Deleting conversation…";let processor=processor,store=store
+        DispatchQueue.global(qos:.utility).async { [weak self] in processor.waitUntilIdle();do{try store.deleteSession(session.id);DispatchQueue.main.async{if self?.selected==session.id{self?.selected=nil};self?.status="Conversation deleted";self?.refresh()}}catch{DispatchQueue.main.async{self?.error=error.localizedDescription}}}
+    }
+    func edit(_ segment:Segment,text:String,speaker:String){do{try store.edit(segment.id,text:text,speaker:speaker);refresh()}catch{self.error=error.localizedDescription}}
+    func undo(_ segment:Segment){do{try store.undo(segment.id);refresh()}catch{self.error=error.localizedDescription}}
+    func forgetProfile(){do{try store.exec("DELETE FROM profiles");profileReady=false}catch{self.error=error.localizedDescription}}
+}
+
+@main struct NagiApp:App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
+    @StateObject private var journal=Journal()
+    var body:some Scene {
+        WindowGroup("Nagi",id:"journal") {ContentView().environmentObject(journal).frame(minWidth:1000,minHeight:690)}
+        MenuBarExtra("Nagi",systemImage:journal.recording ? "record.circle.fill":"waveform.circle") {MenuView().environmentObject(journal)}
+        Settings {PreferencesView().environmentObject(journal).frame(width:660,height:630).padding(24)}
+    }
+}
+struct MenuView:View {
+    @EnvironmentObject var journal:Journal
+    @Environment(\.openWindow) var openWindow
+    var body:some View {Text(journal.status);Text(journal.processing);Divider();Button("Open journal"){openWindow(id:"journal");NSApp.activate(ignoringOtherApps:true)};Button(journal.recording ? "Stop and save":"Start recording"){journal.recording ? journal.stop():journal.start()};Divider();Button("Quit Nagi"){journal.stop(note:"App quit");NSApp.terminate(nil)}}
+}
