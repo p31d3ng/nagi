@@ -24,9 +24,11 @@ do {
         let file=try AVAudioFile(forReading:URL(fileURLWithPath:args[3])),rate=file.processingFormat.sampleRate
         let buffer=AVAudioPCMBuffer(pcmFormat:file.processingFormat,frameCapacity:4096)!,start=Date();var fed:Int64=0,accepted:Int64=0
         while fed<Int64(duration*rate) {
+            try autoreleasepool {
             if file.framePosition==file.length {file.framePosition=0}
             try file.read(into:buffer,frameCount:AVAudioFrameCount(min(4096,Int64(duration*rate)-fed)))
             if writer.enqueue(buffer) {accepted+=Int64(buffer.frameLength)};fed+=Int64(buffer.frameLength)
+            }
             let wait=Double(fed)/rate/speed-Date().timeIntervalSince(start);if wait>0 {Thread.sleep(forTimeInterval:wait)}
         }
         try writer.finish();try store.finish(id);processor.schedule();processor.waitUntilIdle()

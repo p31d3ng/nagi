@@ -13,8 +13,8 @@ public struct ASRSegment:Decodable {public let t0_ms:Int;public let t1_ms:Int;pu
 /// One serial worker lane. ML in separate, network-denied processes, with timeouts.
 public final class Processor: @unchecked Sendable {
     public let store:Store;public let project:URL
-    private let lane=DispatchQueue(label:"stillpoint.processing",qos:.utility)
-    private let retentionLane=DispatchQueue(label:"nagi.audio.expiry",qos:.utility)
+    private let lane=DispatchQueue(label:"stillpoint.processing",qos:.utility,autoreleaseFrequency:.workItem)
+    private let retentionLane=DispatchQueue(label:"nagi.audio.expiry",qos:.utility,autoreleaseFrequency:.workItem)
     private let state=NSLock();private var scheduled=false
     private var lastCleanup=Date.distantPast
     public var onStatus:((String)->Void)?;public var onChange:(()->Void)?
@@ -43,7 +43,7 @@ public final class Processor: @unchecked Sendable {
                 // A continuous backlog must not starve retention behind the drain loop.
                 if Date().timeIntervalSince(lastCleanup)>=60 {try store.cleanup(cap:Int(store.setting("cap",fallback:"500000000")) ?? 500000000);lastCleanup=Date()}
                 guard store.audioAvailable(chunk) else {try store.exec("UPDATE chunks SET status='expired' WHERE id=?",[chunk.id]);continue}
-                do {try process(chunk)} catch {try store.exec("UPDATE chunks SET status='failed',error=? WHERE id=?",[error.localizedDescription,chunk.id]);onStatus?("Needs attention: \(error.localizedDescription)")}
+                do {try autoreleasepool {try process(chunk)}} catch {try store.exec("UPDATE chunks SET status='failed',error=? WHERE id=?",[error.localizedDescription,chunk.id]);onStatus?("Needs attention: \(error.localizedDescription)")}
                 onChange?()
             }
         }catch {onStatus?(error.localizedDescription)}
@@ -139,9 +139,9 @@ public final class Processor: @unchecked Sendable {
             try store.exec("UPDATE chunks SET status=?,error=? WHERE id=?",[speakers==nil ? "needs_speakers":"done",speakers==nil ? "Speaker analysis unavailable. Retry preserves transcript corrections.":"",chunk.id])
         }
     }
-    private func mapSpeakers(_ embeddings:[String:[Float]],session:String) throws -> [String:String] {
+    func mapSpeakers(_ embeddings:[String:[Float]],session:String) throws -> [String:String] {
         let profile: [Float]? = try store.exec("SELECT embedding FROM profiles WHERE id='Me' AND model='Community1/fc8c3e4'").first.flatMap {$0["embedding"]}.flatMap{try? JSONDecoder().decode([Float].self,from:Data($0.utf8))}
-        var saved=try store.exec("SELECT label,embedding FROM speaker_vectors WHERE session=?",[session]).compactMap {row -> (String,[Float])? in guard let label=row["label"],let value=row["embedding"],let vector=try? JSONDecoder().decode([Float].self,from:Data(value.utf8)) else {return nil};return (label,vector)}
+        var saved=try store.exec("SELECT label,embedding FROM speaker_vectors WHERE session=? ORDER BY label LIMIT 128",[session]).compactMap {row -> (String,[Float])? in guard let label=row["label"],let value=row["embedding"],let vector=try? JSONDecoder().decode([Float].self,from:Data(value.utf8)) else {return nil};return (label,vector)}
         var result:[String:String]=[:]
         for (id,vector) in embeddings.sorted(by:{$0.key<$1.key}) {
             let me=profile.map{VoiceMatch.cosine(vector,$0)} ?? -1
@@ -150,7 +150,7 @@ public final class Processor: @unchecked Sendable {
             if label != "Me" {
                 let scores=saved.map{($0.0,VoiceMatch.cosine(vector,$0.1))}.sorted{$0.1>$1.1}
                 if let best=scores.first,best.1>=0.75,best.1-(scores.dropFirst().first?.1 ?? -1)>=0.12 {label=best.0}
-                else if (scores.first?.1 ?? -1)<0.6 {label="Speaker \(saved.count+2)";saved.append((label,vector));let json=String(data:try JSONEncoder().encode(vector),encoding:.utf8)!;try store.exec("INSERT OR REPLACE INTO speaker_vectors VALUES(?,?,?)",[session,label,json])}
+                else if (scores.first?.1 ?? -1)<0.6,saved.count<128 {label="Speaker \(saved.count+2)";saved.append((label,vector));let json=String(data:try JSONEncoder().encode(vector),encoding:.utf8)!;try store.exec("INSERT OR REPLACE INTO speaker_vectors VALUES(?,?,?)",[session,label,json])}
             }
             result[id]=label
         }

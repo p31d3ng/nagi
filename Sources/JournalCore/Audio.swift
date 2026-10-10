@@ -33,7 +33,12 @@ public enum LocalProcess {
         p.standardOutput=handle;p.standardError=handle;try p.run();let deadline=Date().addingTimeInterval(timeout)
         while p.isRunning && Date()<deadline { Thread.sleep(forTimeInterval:0.05) }
         if p.isRunning { p.terminate();Thread.sleep(forTimeInterval:0.2);if p.isRunning {kill(p.processIdentifier,SIGKILL)};p.waitUntilExit();throw JournalError("Local worker exceeded \(Int(timeout)) seconds; recording is safe. Retry with a smaller model.") }
-        p.waitUntilExit();guard p.terminationStatus==0 else { let details=(try? String(contentsOf:logURL,encoding:.utf8)) ?? "";throw JournalError("Local worker failed (\(p.terminationStatus)): \(String(details.suffix(500)))") }; return p.terminationStatus
+        p.waitUntilExit();guard p.terminationStatus==0 else { let details=logTail(logURL);throw JournalError("Local worker failed (\(p.terminationStatus)): \(String(details.suffix(500)))") }; return p.terminationStatus
+    }
+    public static func logTail(_ url:URL,bytes:Int=4096)->String {
+        guard bytes>0,let input=try? FileHandle(forReadingFrom:url) else{return ""};defer{try? input.close()}
+        guard let end=try? input.seekToEnd() else{return ""};try? input.seek(toOffset:end>UInt64(bytes) ? end-UInt64(bytes):0)
+        return String(decoding:(try? input.read(upToCount:bytes)) ?? Data(),as:UTF8.self)
     }
 }
 
@@ -132,7 +137,7 @@ public enum Archive {
 public final class ChunkWriter: @unchecked Sendable {
     public let store:Store;public let session:String;public let model:String
     private var file:AVAudioFile?;private var chunkID="";private var frames:Int64=0;private var total:Int64=0;private var rate:Double=0
-    private let started:Double;private let queue=DispatchQueue(label:"stillpoint.capture.write",qos:.userInitiated)
+    private let started:Double;private let queue=DispatchQueue(label:"stillpoint.capture.write",qos:.userInitiated,autoreleaseFrequency:.workItem)
     private let slots=DispatchSemaphore(value:64)
     public var onLevel:((Double)->Void)?;public var onError:((String)->Void)?;public var onChunk:(()->Void)?
     private var failed=false
@@ -180,7 +185,7 @@ public final class ChunkWriter: @unchecked Sendable {
         imported=true
         let input=try AVAudioFile(forReading:url)
         guard let buffer=AVAudioPCMBuffer(pcmFormat:input.processingFormat,frameCapacity:4096) else {throw JournalError("Cannot allocate import buffer")}
-        while input.framePosition<input.length {try input.read(into:buffer);try write(buffer)};try closeChunk()
+        while input.framePosition<input.length {try autoreleasepool {try input.read(into:buffer);try write(buffer)}};try closeChunk()
     }
 }
 
@@ -205,5 +210,5 @@ public final class Capture {
         }
         do {try engine.start()} catch {node.removeTap(onBus:0);self.writer=nil;throw error}
     }
-    public func stop() throws {engine.stop();if writer != nil {engine.inputNode.removeTap(onBus:0)};try writer?.finish();writer=nil}
+    public func stop() throws {engine.stop();if writer != nil {engine.inputNode.removeTap(onBus:0)};let pending=writer;writer=nil;try pending?.finish()}
 }

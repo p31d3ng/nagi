@@ -2,8 +2,8 @@ import Foundation
 import CSQLite
 
 public struct JournalError: LocalizedError { public let message: String; public init(_ message: String) { self.message = message }; public var errorDescription: String? { message } }
-public struct Session: Identifiable, Sendable { public let id: String; public let title: String; public let started: Double; public let device: String; public let model: String; public let status: String; public let note: String }
-public struct Segment: Identifiable, Sendable { public let id: Int; public let session: String; public let offset: Double; public let end: Double; public let raw: String; public let corrected: String; public let speaker: String; public let language: String; public let chunk: String }
+public struct Session: Identifiable, Sendable, Equatable { public let id: String; public let title: String; public let started: Double; public let device: String; public let model: String; public let status: String; public let note: String }
+public struct Segment: Identifiable, Sendable, Equatable { public let id: Int; public let session: String; public let offset: Double; public let end: Double; public let raw: String; public let corrected: String; public let speaker: String; public let language: String; public let chunk: String }
 public struct Chunk: Sendable { public let id: String; public let session: String; public let path: String; public let captured: Double; public let offset: Double; public let duration: Double; public let status: String; public let model: String }
 
 /// Single serialized SQLite connection. WAL + FULL sync, bound parameters everywhere.

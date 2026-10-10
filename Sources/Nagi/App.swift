@@ -9,7 +9,18 @@ import JournalCore
     func applicationShouldTerminateAfterLastWindowClosed(_ sender:NSApplication)->Bool {false}
     func applicationShouldTerminate(_ sender:NSApplication)->NSApplication.TerminateReply { Self.stop?();return .terminateNow }
 }
+@MainActor final class CaptureMeter:ObservableObject {
+    @Published var level=0.0
+    @Published var elapsed=0
+}
 @MainActor final class Journal:ObservableObject {
+    let meter=CaptureMeter()
+    var level:Double {get{meter.level} set{meter.level=newValue}}
+    var elapsed:Int {get{meter.elapsed} set{meter.elapsed=newValue}}
+    @Published var speakerChoices:[String]=[]
+    @Published var recordingDetails=""
+    @Published var audioExpiry:Double?
+    @Published var processingFailures:[String]=[]
     @Published var sessions:[Session]=[]
     @Published var selected:String?
     @Published var segments:[Segment]=[]
@@ -19,7 +30,6 @@ import JournalCore
     @Published var status="Ready · choose an input"
     @Published var processing="Idle · audio stays on this Mac"
     @Published var recording=false
-    @Published var level=0.0
     @Published var error:String?
     @Published var connectionPrompt=false
     @Published var query=""
@@ -32,11 +42,12 @@ import JournalCore
     @Published var capMegabytes="500"
     @Published var profileReady=false
     @Published var enrollment=false
-    @Published var elapsed=0
     @Published var playing=false
     let project:URL
     let store:Store
     let processor:Processor
+    let syntheticMonitor=ProcessInfo.processInfo.environment["NAGI_SYNTHETIC_MONITOR"]=="1"
+    private var meterTimer:Timer?
     private let capture=Capture()
     private var writer:ChunkWriter?
     private var timer:Timer?
@@ -49,14 +60,14 @@ import JournalCore
     private var playbackURL:URL?
     private var playbackChunkID:String?
     private var playbackGeneration=0
-    private let playbackLane=DispatchQueue(label:"stillpoint.playback",qos:.utility)
+    private let playbackLane=DispatchQueue(label:"stillpoint.playback",qos:.utility,autoreleaseFrequency:.workItem)
     init() {
         if let override=ProcessInfo.processInfo.environment["STILLPOINT_PROJECT"] {project=URL(fileURLWithPath:override)}
         else if let resources=Bundle.main.resourceURL,FileManager.default.fileExists(atPath:resources.appendingPathComponent("Runtime/bin/ASRWorker").path) {project=resources.appendingPathComponent("Runtime")}
         else {project=URL(fileURLWithPath:FileManager.default.currentDirectoryPath)}
         let defaultData=FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask).first!.appendingPathComponent("Nagi")
         let data=URL(fileURLWithPath:ProcessInfo.processInfo.environment["STILLPOINT_DATA"] ?? defaultData.path)
-        do {store=try Store(root:data);try Archive.recover(store);try store.cleanup(cap:Int(store.setting("cap",fallback:"500000000")) ?? 500000000);processor=try Processor(store:store,project:project)} catch {fatalError("Local store cannot open: \(error). Choose a writable STILLPOINT_DATA folder.")}
+        do {store=try Store(root:data);if !syntheticMonitor {try Archive.recover(store);try store.cleanup(cap:Int(store.setting("cap",fallback:"500000000")) ?? 500000000)};processor=try Processor(store:store,project:project)} catch {fatalError("Local store cannot open: \(error). Choose a writable STILLPOINT_DATA folder.")}
         inputUID=store.setting("inputUID");model=store.setting("model",fallback:"unified");preferredWords=store.setting("preferredWords");keepAwake=store.setting("keepAwake")=="true";capEnabled=store.setting("cap",fallback:"500000000") != "0"
         let storedCap=Int(store.setting("cap",fallback:"500000000")) ?? 500000000
         capMegabytes=store.setting("cap-limit-mb",fallback:storedCap>0 ? String(max(1,storedCap/1000000)):"500")
@@ -75,15 +86,33 @@ import JournalCore
         NSWorkspace.shared.notificationCenter.addObserver(forName:NSWorkspace.didWakeNotification,object:nil,queue:.main){[weak self] _ in Task{@MainActor in self?.stopPlayback();self?.processor.maintenance();self?.status="Awake · recording needs an explicit start"}}
         NotificationCenter.default.addObserver(forName:Notification.Name("NagiQuit"),object:nil,queue:.main){[weak self] _ in Task{@MainActor in self?.stop(note:"App quit")} }
         AppDelegate.stop={ [weak self] in self?.stop(note:"App quit") }
-        processor.schedule()
+        if syntheticMonitor {
+            status="Synthetic test monitor · no microphone"
+            meterTimer=Timer.scheduledTimer(withTimeInterval:0.08,repeats:true){[weak self] _ in Task{@MainActor in guard let self,self.recording else{return};self.level=0.2+0.05*sin(Date().timeIntervalSince1970)}}
+        } else {processor.schedule()}
     }
     func refresh() {
-        do {sessions=try store.sessions();segments=try store.segments(session:query.isEmpty ? selected:nil,query:query,speaker:speakerFilter,language:languageFilter);profileReady = !(try store.exec("SELECT id FROM profiles")).isEmpty}
+        do {
+            let nextSessions=try store.sessions(),nextSegments=try store.segments(session:query.isEmpty ? selected:nil,query:query,speaker:speakerFilter,language:languageFilter)
+            if sessions != nextSessions {sessions=nextSessions};if segments != nextSegments {segments=nextSegments}
+            let ready = !(try store.exec("SELECT id FROM profiles")).isEmpty;if profileReady != ready {profileReady=ready}
+            let choices=Array(Set((try store.segments(session:selected)).map(\.speaker))).sorted();if speakerChoices != choices {speakerChoices=choices}
+            if let selected {
+                recordingDetails=store.setting("metadata-"+selected)+"\n"+store.setting("format-"+selected)
+                audioExpiry=try store.exec("SELECT MIN(captured) AS first FROM chunks WHERE session=? AND path!='' AND captured>?",[selected,Date().timeIntervalSince1970-172800]).first?["first"].flatMap(Double.init).map{$0+172800}
+                processingFailures=try store.exec("SELECT error FROM chunks WHERE session=? AND status IN ('failed','needs_speakers') ORDER BY offset LIMIT 20",[selected]).compactMap{$0["error"]}
+            } else {recordingDetails="";audioExpiry=nil;processingFailures=[]}
+        }
         catch {self.error=error.localizedDescription}
     }
     func tick() {
+        if syntheticMonitor {
+            let active=try? store.exec("SELECT id,started,status FROM sessions ORDER BY started DESC LIMIT 1").first
+            if let active {if selected != active["id"] {selected=active["id"]};let activeRecording=active["status"]=="recording";if recording != activeRecording {recording=activeRecording};elapsed=Int(Date().timeIntervalSince1970-(Double(active["started"] ?? "0") ?? 0))}
+            refresh();processing="Synthetic pipeline · \((try? store.exec("SELECT COUNT(*) AS n FROM chunks WHERE status='queued'").first?["n"]) ?? "0") queued";return
+        }
         if Date().timeIntervalSince(lastMaintenance)>=60 {lastMaintenance=Date();processor.maintenance()}
-        let current=Devices.inputs();let ids=Set(current.map(\.id));devices=current
+        let current=Devices.inputs();let ids=Set(current.map(\.id));if devices != current {devices=current}
         if recording && !ids.contains(inputUID){stop(note:"Selected receiver disappeared. No fallback microphone was used.");error="Selected input disconnected. Your recorded chunks are saved. Reconnect it and start a new session."}
         if !recording,!inputUID.isEmpty,ids.contains(inputUID),!previousDevices.contains(inputUID){connectionPrompt=true;status="Selected input connected · ready to start"}
         previousDevices=ids
@@ -92,6 +121,7 @@ import JournalCore
         if let id=playbackChunkID,let chunk=try? store.chunk(id),!store.audioAvailable(chunk){stopPlayback()}
     }
     func saveSettings() {
+        guard !syntheticMonitor else {error="Settings are read-only in the isolated synthetic test. Open normal Nagi to configure your journal.";return}
         do {
             guard !recording else {throw JournalError("Stop recording before changing input or model settings.")}
             let cap=capEnabled ? try TranscriptCapacity.bytes(megabytes:capMegabytes):0
@@ -103,6 +133,7 @@ import JournalCore
         }catch{self.error=error.localizedDescription}
     }
     func start(enroll:Bool=false) {
+        guard !syntheticMonitor else {error="This is the synthetic soak test window. Recording controls are disabled, and no microphone is opened. Launch normal Nagi with scripts/run-normal.sh to record explicitly in your regular journal. The test will keep running separately.";return}
         guard !recording else{return}
         guard let device=devices.first(where:{$0.id==inputUID}) else {error="Choose a connected input device in Devices. Recording never falls back to another microphone.";return}
         enrollment=enroll
@@ -130,12 +161,14 @@ import JournalCore
         }catch{self.error=error.localizedDescription;enrollment=false}
     }
     func stop(note:String="") {
+        guard !syntheticMonitor else{return}
         guard recording else{return};recording=false;enrollment=false
         do {try capture.stop();if let id=sessionID {try store.finish(id,note:note)}}catch{self.error=error.localizedDescription}
         writer=nil;sessionID=nil;level=0;status=note.isEmpty ? "Saved · ready for another conversation":note
         if assertion != 0 {IOPMAssertionRelease(assertion);assertion=0};processor.schedule();refresh()
     }
     func importAudio() {
+        guard !syntheticMonitor else {error="The synthetic test uses its generated fixture. Import files in normal Nagi.";return}
         let panel=NSOpenPanel();panel.allowedContentTypes=[.audio];guard panel.runModal() == .OK,let url=panel.url else{return}
         guard !recording else{error="Finish recording before importing.";return}
         status="Importing audio locally…"
@@ -158,19 +191,19 @@ import JournalCore
         }
     }
     func stopPlayback(){playbackGeneration+=1;playbackChunkID=nil;player?.stop();player=nil;playing=false;if status=="Playing saved audio" || status=="Preparing playback…" {status="Ready · playback stopped"};if let url=playbackURL,url.path.contains("/derived/"){try? FileManager.default.removeItem(at:url)};playbackURL=nil}
-    func delete(_ session:Session){guard !recording else{error="Finish recording before deleting a session.";return};stopPlayback();status="Deleting conversation…";let processor=processor,store=store
+    func delete(_ session:Session){guard !syntheticMonitor else{return};guard !recording else{error="Finish recording before deleting a session.";return};stopPlayback();status="Deleting conversation…";let processor=processor,store=store
         DispatchQueue.global(qos:.utility).async { [weak self] in processor.waitUntilIdle();do{try store.deleteSession(session.id);DispatchQueue.main.async{if self?.selected==session.id{self?.selected=nil};self?.status="Conversation deleted";self?.refresh()}}catch{DispatchQueue.main.async{self?.error=error.localizedDescription}}}
     }
-    func edit(_ segment:Segment,text:String,speaker:String){do{try store.edit(segment.id,text:text,speaker:speaker);refresh()}catch{self.error=error.localizedDescription}}
-    func undo(_ segment:Segment){do{try store.undo(segment.id);refresh()}catch{self.error=error.localizedDescription}}
-    func forgetProfile(){do{try store.exec("DELETE FROM profiles");profileReady=false}catch{self.error=error.localizedDescription}}
+    func edit(_ segment:Segment,text:String,speaker:String){guard !syntheticMonitor else{return};do{try store.edit(segment.id,text:text,speaker:speaker);refresh()}catch{self.error=error.localizedDescription}}
+    func undo(_ segment:Segment){guard !syntheticMonitor else{return};do{try store.undo(segment.id);refresh()}catch{self.error=error.localizedDescription}}
+    func forgetProfile(){guard !syntheticMonitor else{return};do{try store.exec("DELETE FROM profiles");profileReady=false}catch{self.error=error.localizedDescription}}
 }
 
 @main struct NagiApp:App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     @StateObject private var journal=Journal()
     var body:some Scene {
-        WindowGroup("Nagi",id:"journal") {ContentView().environmentObject(journal).frame(minWidth:1000,minHeight:690)}
+        WindowGroup(journal.syntheticMonitor ? "Nagi · Synthetic soak test":"Nagi",id:"journal") {ContentView().environmentObject(journal).frame(minWidth:1000,minHeight:690)}
         MenuBarExtra("Nagi",systemImage:journal.recording ? "record.circle.fill":"waveform.circle") {MenuView().environmentObject(journal)}
         Settings {PreferencesView().environmentObject(journal).frame(width:660,height:630).padding(24)}
     }
@@ -178,5 +211,5 @@ import JournalCore
 struct MenuView:View {
     @EnvironmentObject var journal:Journal
     @Environment(\.openWindow) var openWindow
-    var body:some View {Text(journal.status);Text(journal.processing);Divider();Button("Open journal"){openWindow(id:"journal");NSApp.activate(ignoringOtherApps:true)};Button(journal.recording ? "Stop and save":"Start recording"){journal.recording ? journal.stop():journal.start()};Divider();Button("Quit Nagi"){journal.stop(note:"App quit");NSApp.terminate(nil)}}
+    var body:some View {Text(journal.status);Text(journal.processing);Divider();Button("Open journal"){openWindow(id:"journal");NSApp.activate(ignoringOtherApps:true)};Button(journal.recording ? "Stop and save":"Start recording"){journal.recording ? journal.stop():journal.start()}.disabled(journal.syntheticMonitor);Divider();Button("Quit Nagi"){journal.stop(note:"App quit");NSApp.terminate(nil)}}
 }

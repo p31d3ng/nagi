@@ -18,46 +18,39 @@ struct ContentView:View {
             }.padding(20).navigationSplitViewColumnWidth(220)
         } detail:{
             VStack(spacing:0) {
+                if j.syntheticMonitor {
+                    Label("SYNTHETIC SOAK TEST · no microphone · isolated test data",systemImage:"testtube.2").font(.headline).foregroundStyle(.orange).frame(maxWidth:.infinity).padding(12).background(.orange.opacity(0.1))
+                }
                 statusBar.padding(24).background(.background)
                 Divider()
                 if section=="Timeline" {timeline}
-                else {ScrollView {settingsSection.padding(32).frame(maxWidth:800,alignment:.leading)}.frame(maxWidth:.infinity,maxHeight:.infinity,alignment:.topLeading)}
+                else {ScrollView {settingsSection.disabled(j.syntheticMonitor).padding(32).frame(maxWidth:800,alignment:.leading)}.frame(maxWidth:.infinity,maxHeight:.infinity,alignment:.topLeading)}
             }.background(Color(nsColor:.windowBackgroundColor))
         }
         .tint(accent)
-        .alert("Needs attention",isPresented:Binding(get:{j.error != nil},set:{if !$0{j.error=nil}})){Button("OK"){j.error=nil}} message:{Text(j.error ?? "")}
+        .alert(j.syntheticMonitor ? "Synthetic test mode":"Needs attention",isPresented:Binding(get:{j.error != nil},set:{if !$0{j.error=nil}})){Button("OK"){j.error=nil}} message:{Text(j.error ?? "")}
         .alert("Your selected input is connected",isPresented:$j.connectionPrompt){Button("Start recording"){j.start()};Button("Later",role:.cancel){}} message:{Text("Start a new conversation with this input? Recording begins only after you choose Start.")}
         .confirmationDialog("Delete this conversation and its saved audio?",isPresented:Binding(get:{deleteCandidate != nil},set:{if !$0{deleteCandidate=nil}})){Button("Delete conversation",role:.destructive){if let s=deleteCandidate{j.delete(s)};deleteCandidate=nil}} message:{Text("This also deletes its original and corrected transcript versions.")}
         .sheet(item:$editing){segment in EditTranscript(segment:segment).environmentObject(j)}
     }
     func icon(_ name:String)->String {switch name{case "Devices":return "mic";case "Models":return "cpu";case "Voice profile":return "person.crop.circle";case "Dictionary":return "text.book.closed";case "Storage":return "internaldrive";default:return "clock"}}
-    var statusBar:some View {
-        HStack(spacing:16){
-            Circle().fill(j.recording ? .red:accent).frame(width:12,height:12)
-            VStack(alignment:.leading,spacing:5){Text(j.status).font(.headline);Text(j.processing).font(.caption).foregroundStyle(.secondary)}
-            Spacer()
-            if j.recording && j.level<0.0008 && j.elapsed>8 {Text("Input is quiet · check TX / receiver").font(.caption).foregroundStyle(.orange)}
-            if j.recording {Text(String(format:"%02d:%02d",j.elapsed/60,j.elapsed%60)).monospacedDigit();ProgressView(value:j.level).frame(width:90).accessibilityLabel("Input level")}
-            Button(j.recording ? "Stop & save":"Start recording",systemImage:j.recording ? "stop.fill":"record.circle"){j.recording ? j.stop():j.start()}.buttonStyle(.borderedProminent).controlSize(.large)
-        }
-    }
+    var statusBar:some View {CaptureStatusBar(j:j,meter:j.meter,accent:accent)}
     var timeline:some View {
         VStack(alignment:.leading,spacing:18) {
             HStack {VStack(alignment:.leading,spacing:4){Text("Your conversations").font(.largeTitle.weight(.semibold));Text("Meetings, plans, and passing thoughts — easy to find again.").foregroundStyle(.secondary)};Spacer();Button("Import audio",systemImage:"square.and.arrow.down"){j.importAudio()}.disabled(j.recording)}
-            HStack {Image(systemName:"magnifyingglass").foregroundStyle(.secondary);TextField("Search transcript words across your timeline",text:$j.query).textFieldStyle(.plain).onChange(of:j.query){_,_ in j.refresh()};Picker("Speaker",selection:$j.speakerFilter){Text("All speakers").tag("");ForEach(Array(Set(((try? j.store.segments(session:j.selected)) ?? []).map(\.speaker))).sorted(),id:\.self){Text($0).tag($0)}}.frame(width:140).onChange(of:j.speakerFilter){_,_ in j.refresh()};Picker("Language",selection:$j.languageFilter){Text("All languages").tag("");ForEach(["en · model assumption","ja · script estimate","zh / ja uncertain","mixed / uncertain","uncertain"],id:\.self){Text($0).tag($0)}}.frame(width:150).onChange(of:j.languageFilter){_,_ in j.refresh()};Button("Clear"){j.query="";j.speakerFilter="";j.languageFilter="";j.refresh()}}.padding(13).background(.background,in:RoundedRectangle(cornerRadius:12))
+            HStack {Image(systemName:"magnifyingglass").foregroundStyle(.secondary);TextField("Search transcript words across your timeline",text:$j.query).textFieldStyle(.plain).onChange(of:j.query){_,_ in j.refresh()};Picker("Speaker",selection:$j.speakerFilter){Text("All speakers").tag("");ForEach(j.speakerChoices,id:\.self){Text($0).tag($0)}}.frame(width:140).onChange(of:j.speakerFilter){_,_ in j.refresh()};Picker("Language",selection:$j.languageFilter){Text("All languages").tag("");ForEach(["en · model assumption","ja · script estimate","zh / ja uncertain","mixed / uncertain","uncertain"],id:\.self){Text($0).tag($0)}}.frame(width:150).onChange(of:j.languageFilter){_,_ in j.refresh()};Button("Clear"){j.query="";j.speakerFilter="";j.languageFilter="";j.refresh()}}.padding(13).background(.background,in:RoundedRectangle(cornerRadius:12))
             HStack(alignment:.top,spacing:20){
                 ScrollView {LazyVStack(spacing:10){ForEach(j.sessions){session in Button {j.selected=session.id;j.refresh()} label:{VStack(alignment:.leading,spacing:9){HStack {Image(systemName:"bubble.left.and.bubble.right").foregroundStyle(accent);Text(Date(timeIntervalSince1970:session.started).formatted(date:.abbreviated,time:.shortened)).font(.caption);Spacer()};Text(session.title).font(.headline).lineLimit(2);HStack{Text(session.status.capitalized).font(.caption).foregroundStyle(.secondary);Spacer();Text(session.model=="unified" ? "EN":"MULTI").font(.caption2.weight(.bold)).foregroundStyle(accent)}}.padding(16).frame(maxWidth:.infinity,alignment:.leading).background(j.selected==session.id ? accent.opacity(0.13):Color(nsColor:.controlBackgroundColor),in:RoundedRectangle(cornerRadius:14))}.buttonStyle(.plain)}}}.frame(width:260)
                 ScrollView {
-                    VStack(alignment:.leading,spacing:16){
+                    LazyVStack(alignment:.leading,spacing:16){
                         if let session=j.sessions.first(where:{$0.id==j.selected}) {
                             HStack {Text(session.title).font(.title2.weight(.semibold));Spacer();Button(role:.destructive){deleteCandidate=session}label:{Image(systemName:"trash")}.disabled(j.recording)}
                             Text(session.device).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                            DisclosureGroup("Recording details"){Text(j.store.setting("metadata-"+session.id)+"\n"+j.store.setting("format-"+session.id)+"\nSpeaker labels, including Me, are estimates. Overlapping and distant voices may be missed.").font(.caption.monospaced()).textSelection(.enabled)}
+                            DisclosureGroup("Recording details"){Text(j.recordingDetails+"\nSpeaker labels, including Me, are estimates. Overlapping and distant voices may be missed.").font(.caption.monospaced()).textSelection(.enabled)}
                             if !session.note.isEmpty {Label(session.note,systemImage:"info.circle").font(.callout).foregroundStyle(.secondary).lineLimit(2)}
                             Text(speakerSummary).font(.caption).foregroundStyle(accent)
-                            let chunks=(try? j.store.chunks(session:session.id)) ?? []
-                            if let first=chunks.first {Text("Audio expires \(Date(timeIntervalSince1970:first.captured+172800).formatted()) · transcript retained.").font(.caption).foregroundStyle(.secondary)}
-                            if chunks.contains(where:{$0.status=="failed" || $0.status=="needs_speakers"}) {Button("Retry failed processing",systemImage:"arrow.clockwise"){do{try j.processor.retry()}catch{j.error=error.localizedDescription}};ForEach(chunks.filter{$0.status=="failed" || $0.status=="needs_speakers"},id:\.id){chunk in Text((try? j.store.exec("SELECT error FROM chunks WHERE id=?",[chunk.id]).first?["error"]) ?? "Processing failed").font(.caption).foregroundStyle(.orange)}}
+                            if let expiry=j.audioExpiry {Text("Audio expires \(Date(timeIntervalSince1970:expiry).formatted()) · transcript retained.").font(.caption).foregroundStyle(.secondary)}
+                            if !j.processingFailures.isEmpty {Button("Retry failed processing",systemImage:"arrow.clockwise"){do{try j.processor.retry()}catch{j.error=error.localizedDescription}};ForEach(Array(j.processingFailures.enumerated()),id:\.offset){failure in Text(failure.element).font(.caption).foregroundStyle(.orange)}}
                         }
                         if j.segments.isEmpty {ContentUnavailableView(!j.query.isEmpty ? "No matching words":j.sessions.isEmpty ? "A quiet place for your conversations":j.selected==nil ? "Choose a conversation":"No transcript yet",systemImage:"waveform",description:Text(!j.query.isEmpty ? "Try another word or clear the speaker and language filters.":j.sessions.isEmpty ? "Choose your receiver in Devices, then start recording. You can also import a local audio file.":j.selected==nil ? "Select a recent conversation to review its transcript and playback.":"Audio chunks are durable. Processing status and recovery options appear above; silence has no transcript."))}
                         ForEach(j.segments){segment in
@@ -121,4 +114,20 @@ struct EditTranscript:View {
     @State private var speaker="Unknown"
     var body:some View {VStack(alignment:.leading,spacing:20){Text("Review transcript").font(.title2.weight(.semibold));TextEditor(text:$text).frame(height:180);TextField("Speaker label (Me / Speaker 2 / Unknown)",text:$speaker).textFieldStyle(.roundedBorder);DisclosureGroup("Raw ASR text"){Text(segment.raw).textSelection(.enabled)};HStack{Button("Cancel"){dismiss()};Spacer();Button("Save correction"){j.edit(segment,text:text,speaker:speaker);dismiss()}.buttonStyle(.borderedProminent)}}.padding(28).frame(width:600).onAppear{text=segment.corrected;speaker=segment.speaker}}
 
+}
+
+struct CaptureStatusBar:View {
+    @ObservedObject var j:Journal
+    @ObservedObject var meter:CaptureMeter
+    let accent:Color
+    var body:some View {
+        HStack(spacing:16){
+            Circle().fill(j.recording ? .red:accent).frame(width:12,height:12)
+            VStack(alignment:.leading,spacing:5){Text(j.status).font(.headline);Text(j.processing).font(.caption).foregroundStyle(.secondary)}
+            Spacer()
+            if j.recording && meter.level<0.0008 && meter.elapsed>8 {Text("Input is quiet · check TX / receiver").font(.caption).foregroundStyle(.orange)}
+            if j.recording {Text(String(format:"%02d:%02d",meter.elapsed/60,meter.elapsed%60)).monospacedDigit();ProgressView(value:meter.level).frame(width:90).accessibilityLabel("Input level")}
+            Button(j.syntheticMonitor ? "Test controls disabled":j.recording ? "Stop & save":"Start recording",systemImage:j.recording ? "stop.fill":"record.circle"){j.recording ? j.stop():j.start()}.buttonStyle(.borderedProminent).controlSize(.large).disabled(j.syntheticMonitor)
+        }
+    }
 }

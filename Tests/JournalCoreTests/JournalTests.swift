@@ -6,6 +6,21 @@ final class JournalTests:XCTestCase {
     override func setUpWithError() throws {root=FileManager.default.temporaryDirectory.appendingPathComponent("stillpoint-test-\(UUID())");store=try Store(root:root)}
     override func tearDownWithError() throws {store=nil;try? FileManager.default.removeItem(at:root)}
     func session(_ at:Double=Date().timeIntervalSince1970) throws -> String {try store.createSession(title:"Synthetic",device:"fixture",model:"unified",at:at)}
+    func testFailureLogTailIsBounded() throws {
+        let log=root.appendingPathComponent("large-worker.log")
+        try Data((String(repeating:"x",count:2_000_000)+"tail-marker").utf8).write(to:log)
+        let tail=LocalProcess.logTail(log)
+        XCTAssertEqual(tail.utf8.count,4096);XCTAssertTrue(tail.hasSuffix("tail-marker"))
+        XCTAssertEqual(LocalProcess.logTail(log,bytes:0),"")
+    }
+    func testSpeakerCatalogIsBoundedAndKnownIdentitiesRemainMatchable() throws {
+        let id=try session(),processor=try Processor(store:store,project:root)
+        func vector(_ index:Int)->[Float] {var v=[Float](repeating:0,count:256);v[index]=1;return v}
+        for i in 0..<130 {_ = try processor.mapSpeakers(["speaker":vector(i)],session:id)}
+        XCTAssertEqual(try store.exec("SELECT count(*) AS n FROM speaker_vectors").first?["n"],"128")
+        XCTAssertEqual(try processor.mapSpeakers(["speaker":vector(130)],session:id)["speaker"],"Unknown")
+        XCTAssertEqual(try processor.mapSpeakers(["speaker":vector(0)],session:id)["speaker"],"Speaker 2")
+    }
     func testFTSSpeakerLanguageAndQuotes() throws {let id=try session();try store.insertSegment(session:id,offset:4,end:8,raw:"Meet Kyoto",corrected:"Meet Kyoto",speaker:"Me",language:"en",chunk:"");XCTAssertEqual(try store.segments(query:"Kyoto",speaker:"Me",language:"en").first?.offset,4);XCTAssertTrue(try store.segments(query:"Kyoto",speaker:"Speaker 2").isEmpty);XCTAssertNoThrow(try store.segments(query:"\" OR *"))}
     func testCorrectionHistoryRawAndUndo() throws {let id=try session();try store.insertSegment(session:id,offset:0,end:1,raw:"SQ Lite",corrected:"SQLite",speaker:"Unknown",language:"en",chunk:"");let s=try XCTUnwrap(store.segments().first);try store.edit(s.id,text:"SQLite 3",speaker:"Me");try store.undo(s.id);XCTAssertEqual(try store.segments().first?.corrected,"SQLite");XCTAssertEqual(try store.segments().first?.raw,"SQ Lite");try store.undo(s.id);XCTAssertEqual(try store.segments().first?.corrected,"SQ Lite")}
     func testCJKSubstringSearch() throws {let id=try session();try store.insertSegment(session:id,offset:5,end:9,raw:"今日は会議の計画を話します",corrected:"今日は会議の計画を話します",speaker:"Unknown",language:"ja",chunk:"");XCTAssertEqual(try store.segments(query:"会議").first?.offset,5)}
