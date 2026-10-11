@@ -227,6 +227,7 @@ struct ContentView: View {
                             Text(session.device).font(.caption).foregroundStyle(.secondary)
                                 .textSelection(
                                     .enabled)
+                            Text(j.savingSummary).font(.caption).foregroundStyle(.secondary)
                             DisclosureGroup("Recording details") {
                                 Text(
                                     j.recordingDetails
@@ -246,7 +247,7 @@ struct ContentView: View {
                                 Button("Play conversation", systemImage: "play.circle.fill") {
                                     j.playConversation(session: session.id)
                                 }
-                                .disabled(j.recording)
+                                .disabled(j.recording || j.audioExpiry == nil)
                                 if j.playbackSession == session.id {
                                     Button(j.playbackState == .paused ? "Resume" : "Pause") {
                                         j.playbackState == .paused
@@ -257,9 +258,12 @@ struct ContentView: View {
                                 }
                             }
                             Text(
-                                "Continuous audio across chunks; timestamp buttons start from that point. Sentence times are estimates."
+                                "Playback continues across saved spans and skips documented non-speech. Timestamps keep original elapsed time; sentence times are estimates."
                             )
                             .font(.caption).foregroundStyle(.secondary)
+                            if !j.playbackNotice.isEmpty {
+                                Text(j.playbackNotice).font(.caption).foregroundStyle(accent)
+                            }
                             if let expiry = j.audioExpiry {
                                 Text(
                                     "Audio expires \(Date(timeIntervalSince1970:expiry).formatted()) · transcript retained."
@@ -461,6 +465,16 @@ struct ContentView: View {
                 )
                 .font(.callout).foregroundStyle(.secondary)
             default:
+                Picker("Saving for new recordings", selection: $j.savingMode) {
+                    Text("Speech only · default").tag(AudioSavingMode.speechOnly.rawValue)
+                    Text("Continuous audio").tag(AudioSavingMode.continuous.rawValue)
+                }
+                .disabled(j.recording)
+                .onChange(of: j.savingMode) { _, _ in j.saveSavingMode() }
+                Text(
+                    "Speech only uses a local speech detector with one second before/after speech. Long non-speech intervals are omitted; original elapsed timestamps remain. Noise can occasionally trigger saving, and faint/distant speech may be missed. Choose Continuous to preserve every sound. Existing audio is unchanged; guided enrollment and imports use continuous audio."
+                )
+                .font(.callout).foregroundStyle(.secondary)
                 Text(
                     "Audio and every derived audio copy expire 48 hours from capture. Original sample rate and channels are retained in losslessly gzip-compressed CAF chunks. The local data directory is excluded from backups where macOS supports it."
                 )

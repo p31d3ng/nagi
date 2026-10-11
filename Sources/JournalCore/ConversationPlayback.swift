@@ -9,6 +9,7 @@ import Foundation
     public private(set) var position = 0.0
     public var onChange: (() -> Void)?
     public var onMessage: ((String) -> Void)?
+    public var onSkippedSilence: ((String) -> Void)?
     public var volume: Float = 1
     private let store: Store
     private let lane = DispatchQueue(
@@ -91,9 +92,18 @@ import Foundation
                     )
                 }
                 if item.offset > offset + 0.02 {
-                    throw JournalError(
-                        "Recording gap before \(Int(item.offset)) seconds. Choose a later timestamp to continue; missing audio was not skipped silently."
-                    )
+                    if store.isOmittedSilence(session: session, start: offset, end: item.offset) {
+                        DispatchQueue.main.async { [weak self] in
+                            guard let self, self.generation == token else { return }
+                            self.onSkippedSilence?(
+                                "Skipped \(String(format: "%.1f", item.offset - offset)) seconds of omitted non-speech. Clock keeps original elapsed time."
+                            )
+                        }
+                    } else {
+                        throw JournalError(
+                            "Recording gap before \(Int(item.offset)) seconds. Choose a later timestamp to continue; missing audio was not skipped silently."
+                        )
+                    }
                 }
                 url = try Archive.decompress(item, store: store)
                 let preparedURL = url!

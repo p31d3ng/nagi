@@ -80,6 +80,15 @@ int main(int argc, char **argv) {
     while (std::cin.read(reinterpret_cast<char *>(&count), sizeof(count))) {
         if (count == 0)
             break;
+        if (count == UINT32_MAX) {
+            if (active) {
+                if (!check(transcribe_stream_finalize(session, nullptr)))
+                    return 7;
+                emit(true);
+                active = false;
+            }
+            continue;
+        }
         double sourceOffset;
         if (count > 16384 ||
             !std::cin.read(reinterpret_cast<char *>(&sourceOffset), sizeof(sourceOffset)))
@@ -87,6 +96,13 @@ int main(int argc, char **argv) {
         std::vector<float> pcm(count);
         if (!std::cin.read(reinterpret_cast<char *>(pcm.data()), count * sizeof(float)))
             return 4;
+        // A speech-only archive preserves elapsed offsets. Never concatenate omitted time.
+        if (active && sourceOffset > offset + frames / 16000.0 + 0.01) {
+            if (!check(transcribe_stream_finalize(session, nullptr)))
+                return 7;
+            emit(true);
+            active = false;
+        }
         for (uint32_t pos = 0; pos < count;) {
             if (!active) {
                 if (!check(transcribe_stream_begin(session, nullptr, &stream)))

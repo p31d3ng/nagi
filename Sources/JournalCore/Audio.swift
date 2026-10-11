@@ -189,6 +189,28 @@ public enum Archive {
             }
         }
         // Remove only orphaned/completed temporary files in our audio directory.
+        for row in try store.exec(
+            "SELECT p.session,p.end FROM capture_progress p JOIN sessions s ON s.id=p.session WHERE s.status='interrupted'"
+        ) {
+            guard let session = row["session"], let progress = Double(row["end"] ?? "") else {
+                continue
+            }
+            let keptEnd = try store.chunks(session: session)
+                .reduce(0.0) { max($0, $1.offset + $1.duration) }
+            let omittedEnd =
+                Double(
+                    try store
+                        .exec(
+                            "SELECT COALESCE(MAX(end),0) AS last FROM audio_gaps WHERE session=?",
+                            [session]
+                        )
+                        .first?["last"] ?? "0") ?? 0
+            if progress > max(keptEnd, omittedEnd) {
+                try store.recordGap(
+                    session: session, start: max(keptEnd, omittedEnd), end: progress,
+                    reason: "crash_unfinalized")
+            }
+        }
         let known = Set(try store.chunksWithAudio().map(\.path))
         for url in try FileManager.default.contentsOfDirectory(
             at: store.root.appendingPathComponent("audio"), includingPropertiesForKeys: nil)
@@ -318,11 +340,15 @@ public final class ChunkWriter: @unchecked Sendable {
     public var onError: ((String) -> Void)?
     public var onChunk: (() -> Void)?
     public var onWritten: ((AVAudioPCMBuffer, Double) -> Void)?
+    public var onSpanEnded: ((Double) -> Void)?
     private var failed = false
     private var imported = false
     private let admission = NSLock()
     private var stopped = false
     private var capturedDuration = 0.0
+    private var gate: SpeechGate?
+    private var lastProgress = 0.0
+    public var onActivity: ((Bool) -> Void)?
     public var writtenDuration: Double {
         admission.lock(); defer { admission.unlock() }; return capturedDuration
     }
@@ -333,6 +359,31 @@ public final class ChunkWriter: @unchecked Sendable {
         self.session = session
         self.model = model
         self.started = started
+    }
+    public func enableSpeechOnly(vad: SpeechVAD) throws {
+        try enableSpeechOnly(gate: SpeechGate(vad: vad))
+    }
+    public func enableSpeechOnly(gate: SpeechGate) throws {
+        guard total == 0, file == nil else {
+            throw JournalError("Saving mode cannot change during a recording")
+        }
+        gate.onKeep = { [weak self] buffer, offset in try self?.writeSaved(buffer, at: offset) }
+        gate.onClose = { [weak self] end in
+            try self?.closeChunk(); self?.onSpanEnded?(end)
+        }
+        gate.onGap = { [weak self] start, end in
+            guard let self else { return };
+            let first = try self.store
+                .exec(
+                    "SELECT 1 FROM audio_gaps WHERE session=? AND start=?", [self.session, start]
+                )
+                .isEmpty
+            try self.store.recordGap(session: self.session, start: start, end: end)
+            if first { self.onChunk?() }
+        }
+        gate.onActivity = { [weak self] value in self?.onActivity?(value) }
+        self.gate = gate
+        try store.set("saving-" + session, AudioSavingMode.speechOnly.rawValue)
     }
     @discardableResult public func enqueue(_ buffer: AVAudioPCMBuffer) -> Bool {
         admission.lock()
@@ -375,11 +426,42 @@ public final class ChunkWriter: @unchecked Sendable {
     }
     public func write(_ buffer: AVAudioPCMBuffer) throws {
         guard !failed else { return }
+        let inputRate = buffer.format.sampleRate
+        if let data = buffer.floatChannelData {
+            var peak = 0.0
+            let channels = Int(buffer.format.channelCount)
+            for channel in 0..<channels {
+                var sum = 0.0
+                for i in 0..<Int(buffer.frameLength) {
+                    let value =
+                        buffer.format.isInterleaved
+                        ? data[0][i * channels + channel] : data[channel][i]
+                    sum += Double(value * value)
+                }
+                peak = max(peak, sqrt(sum / max(1, Double(buffer.frameLength))))
+            }
+            onLevel?(peak)
+        }
+        if let gate {
+            try gate.feed(buffer)
+        } else {
+            try writeSaved(buffer, at: Double(total) / inputRate)
+        }
+        total += Int64(buffer.frameLength)
+        admission.lock(); capturedDuration = Double(total) / inputRate; admission.unlock()
+        if gate != nil, capturedDuration - lastProgress >= 1 {
+            try store.exec(
+                "INSERT OR REPLACE INTO capture_progress VALUES(?,?,?)",
+                [session, capturedDuration, "speechOnly"])
+            lastProgress = capturedDuration
+        }
+    }
+    private func writeSaved(_ buffer: AVAudioPCMBuffer, at offset: Double) throws {
         let target = Int64(buffer.format.sampleRate * 10)
         let remaining = target - (file == nil ? 0 : frames)
         if Int64(buffer.frameLength) > remaining {
             // Split exactly at the original-rate frame boundary, never drop or repeat samples.
-            for (offset, count) in [
+            for (partOffset, count) in [
                 (0, Int(remaining)), (Int(remaining), Int(buffer.frameLength) - Int(remaining)),
             ] {
                 let part = AVAudioPCMBuffer(
@@ -390,9 +472,10 @@ public final class ChunkWriter: @unchecked Sendable {
                 for i in 0..<src.count {
                     let stride = Int(src[i].mDataByteSize) / Int(buffer.frameLength)
                     memcpy(
-                        dst[i].mData!, src[i].mData!.advanced(by: offset * stride), count * stride)
+                        dst[i].mData!, src[i].mData!.advanced(by: partOffset * stride),
+                        count * stride)
                 }
-                try write(part)
+                try writeSaved(part, at: offset + Double(partOffset) / buffer.format.sampleRate)
             }
             return
         }
@@ -404,8 +487,8 @@ public final class ChunkWriter: @unchecked Sendable {
             let path = "audio/\(UUID().uuidString).caf"
             chunkID = try store.registerChunk(
                 session: session, path: path,
-                captured: started + (imported ? 0 : Double(total) / rate),
-                offset: Double(total) / rate, model: model)
+                captured: started + (imported ? 0 : offset),
+                offset: offset, model: model)
             file = try AVAudioFile(
                 forWriting: store.root.appendingPathComponent(path),
                 settings: buffer.format.settings)
@@ -415,21 +498,8 @@ public final class ChunkWriter: @unchecked Sendable {
             throw JournalError("Input format changed; finalize and start a new recording.")
         }
         try file!.write(from: buffer)
-        onWritten?(buffer, Double(total) / rate)
+        onWritten?(buffer, offset)
         frames += Int64(buffer.frameLength)
-        total += Int64(buffer.frameLength)
-        admission.lock(); capturedDuration = Double(total) / rate; admission.unlock()
-        if let data = buffer.floatChannelData {
-            var peak = 0.0
-            for channel in 0..<Int(buffer.format.channelCount) {
-                var sum = 0.0
-                for i in 0..<Int(buffer.frameLength) {
-                    sum += Double(data[channel][i] * data[channel][i])
-                }
-                peak = max(peak, sqrt(sum / max(1, Double(buffer.frameLength))))
-            }
-            onLevel?(peak)
-        }
         if Double(frames) / rate >= 10 { try closeChunk() }
     }
     private func closeChunk() throws {
@@ -445,7 +515,18 @@ public final class ChunkWriter: @unchecked Sendable {
     }
     public func finish() throws {
         var thrown: Error?
-        queue.sync { do { try closeChunk() } catch { thrown = error } }
+        queue.sync {
+            do { try gate?.finish() } catch { thrown = error }
+            // A VAD failure cannot strand the already kept CAF tail unsealed.
+            do { try closeChunk() } catch { if thrown == nil { thrown = error } }
+            do {
+                if gate != nil {
+                    try store.exec(
+                        "INSERT OR REPLACE INTO capture_progress VALUES(?,?,?)",
+                        [session, capturedDuration, "speechOnly"])
+                }
+            } catch { if thrown == nil { thrown = error } }
+        }
         if let thrown { throw thrown }
     }
     public func importFile(_ url: URL) throws {

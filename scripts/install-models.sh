@@ -25,6 +25,10 @@ fetch handy-computer/whisper-medium-gguf \
   ec78f06fded51aa82cde751678b78f76f78c8b7f \
   whisper-medium-Q4_K_M.gguf \
   6c9cad9c41d1fa0fcc624898f7ee3485b66127627878081a5655c6f6f3ce20ab
+fetch handy-computer/silero-vad-v6.2-gguf \
+  97bbd75179f535e4708bccdf61e9278b8b60dfc7 \
+  silero-vad-v6.2-F32.gguf \
+  0d871a800c420fdd5d1b17a3aea4296d1c39608f0ff4a9295eb76457eb1c88e6
 [[ -f "$project/Fixtures/english.wav" ]] || python3 "$project/scripts/fixtures.py"
 "$project/.build/debug/SpeakerWorker" \
   "$project/Fixtures/english.wav" \

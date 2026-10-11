@@ -1,7 +1,39 @@
 {
-  "transcribe.cpp": {"repository":"https://github.com/handy-computer/transcribe.cpp","commit":"5d66f60257a75e9bdbddc72dc0887b32e9d4841a","license":"MIT"},
-  "FluidAudio": {"repository":"https://github.com/FluidInference/FluidAudio","commit":"fc8c3e4f5103bf63a242453566525272e143a054","license":"Apache-2.0","minimumOS":"macOS 14; Nagi targets macOS 15"},
-  "parakeet-unified-en-0.6b-Q8_0": {"repository":"https://huggingface.co/handy-computer/parakeet-unified-en-0.6b-gguf","revision":"7e948f21b7bdbac698d3318db9d350f1096f3b6c","size_bytes":731357568,"sha256":"4b50b6dd862bf6e346929aaf4f5eaacec003bfa3f56462d6c874b41ef2f38795","terms":"CC-BY-4.0; separately licensed weights"},
-  "whisper-medium-Q4_K_M": {"repository":"https://huggingface.co/handy-computer/whisper-medium-gguf","revision":"ec78f06fded51aa82cde751678b78f76f78c8b7f","size_bytes":504102848,"sha256":"6c9cad9c41d1fa0fcc624898f7ee3485b66127627878081a5655c6f6f3ce20ab","terms":"Apache-2.0 as catalogued; separately licensed weights"},
-  "Community1": {"repository":"https://huggingface.co/FluidInference/speaker-diarization-coreml","revision":"df2625ac79a7ac6b65ad868fee6d80f320da4232","terms":"CC-BY-4.0; Community-1/pyannote and WeSpeaker attribution; SDK licensing does not replace model terms"}
+  "transcribe.cpp": {
+    "repository": "https://github.com/handy-computer/transcribe.cpp",
+    "commit": "5d66f60257a75e9bdbddc72dc0887b32e9d4841a",
+    "license": "MIT"
+  },
+  "FluidAudio": {
+    "repository": "https://github.com/FluidInference/FluidAudio",
+    "commit": "fc8c3e4f5103bf63a242453566525272e143a054",
+    "license": "Apache-2.0",
+    "minimumOS": "macOS 14; Nagi targets macOS 15"
+  },
+  "parakeet-unified-en-0.6b-Q8_0": {
+    "repository": "https://huggingface.co/handy-computer/parakeet-unified-en-0.6b-gguf",
+    "revision": "7e948f21b7bdbac698d3318db9d350f1096f3b6c",
+    "size_bytes": 731357568,
+    "sha256": "4b50b6dd862bf6e346929aaf4f5eaacec003bfa3f56462d6c874b41ef2f38795",
+    "terms": "CC-BY-4.0; separately licensed weights"
+  },
+  "whisper-medium-Q4_K_M": {
+    "repository": "https://huggingface.co/handy-computer/whisper-medium-gguf",
+    "revision": "ec78f06fded51aa82cde751678b78f76f78c8b7f",
+    "size_bytes": 504102848,
+    "sha256": "6c9cad9c41d1fa0fcc624898f7ee3485b66127627878081a5655c6f6f3ce20ab",
+    "terms": "Apache-2.0 as catalogued; separately licensed weights"
+  },
+  "Community1": {
+    "repository": "https://huggingface.co/FluidInference/speaker-diarization-coreml",
+    "revision": "df2625ac79a7ac6b65ad868fee6d80f320da4232",
+    "terms": "CC-BY-4.0; Community-1/pyannote and WeSpeaker attribution; SDK licensing does not replace model terms"
+  },
+  "Silero-VAD-v6.2-F32": {
+    "repository": "https://huggingface.co/handy-computer/silero-vad-v6.2-gguf",
+    "revision": "97bbd75179f535e4708bccdf61e9278b8b60dfc7",
+    "sha256": "0d871a800c420fdd5d1b17a3aea4296d1c39608f0ff4a9295eb76457eb1c88e6",
+    "size_bytes": 1241056,
+    "terms": "MIT; separately licensed model weights; source upstream Silero Team/snakers4"
+  }
 }

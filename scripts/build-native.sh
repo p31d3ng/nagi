@@ -36,3 +36,12 @@ c++ -O3 -std=c++17 \
   -framework Metal \
   -framework MetalKit \
   -o "$project/bin/LiveASRWorker"
+
+c++ -O3 -std=c++17 -dynamiclib -I "$dep/include" \
+  "$project/Native/SpeechVAD.cpp" \
+  "$dep/build/src/libtranscribe.a" \
+  "$dep/build/ggml/src/libggml.a" "$dep/build/ggml/src/libggml-cpu.a" \
+  "$dep/build/ggml/src/ggml-metal/libggml-metal.a" "$dep/build/ggml/src/libggml-base.a" \
+  -framework Accelerate -framework Foundation -framework Metal -framework MetalKit \
+  -o "$project/bin/libNagiVAD.dylib"
+codesign --force --sign - "$project/bin/libNagiVAD.dylib"

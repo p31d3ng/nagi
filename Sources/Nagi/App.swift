@@ -40,6 +40,10 @@ import SwiftUI
     @Published var liveStatus = "Start recording explicitly to see a live conversation."
     @Published var liveMode = "balanced"
     @Published var liveRevision = 0
+    @Published var savingMode = AudioSavingMode.speechOnly.rawValue
+    @Published var savingSpeech = false
+    @Published var playbackNotice = ""
+    @Published var savingSummary = ""
     @Published var liveEngineActive = false
     @Published var liveCommitted = ""
     @Published var liveTentative = ""
@@ -144,6 +148,10 @@ import SwiftUI
             if self.playing != active { self.playing = active }
         }
         conversationPlayer.onMessage = { [weak self] message in self?.error = message }
+        conversationPlayer.onSkippedSilence = { [weak self] message in
+            self?.playbackNotice = message
+        }
+        savingMode = store.setting("saving-mode", fallback: AudioSavingMode.speechOnly.rawValue)
         liveMode = store.setting("live-mode", fallback: "balanced")
         inputUID = store.setting("inputUID")
         model = store.setting("model", fallback: "unified")
@@ -238,6 +246,18 @@ import SwiftUI
                 .sorted()
             if speakerChoices != choices { speakerChoices = choices }
             if let selected {
+                let omitted =
+                    Double(
+                        try store
+                            .exec(
+                                "SELECT COALESCE(SUM(end-start),0) AS duration FROM audio_gaps WHERE session=? AND reason='omitted_nonspeech'",
+                                [selected]
+                            )
+                            .first?["duration"] ?? "0") ?? 0
+                savingSummary =
+                    store.setting("saving-" + selected) == "speechOnly"
+                    ? "Speech-only audio · \(Int(omitted)) seconds of non-speech omitted · original elapsed timestamps"
+                    : "Continuous audio"
                 recordingDetails =
                     store.setting("metadata-" + selected) + "\n"
                     + store.setting("format-" + selected) + "\n" + store.setting("live-" + selected)
@@ -371,6 +391,12 @@ import SwiftUI
             self.error = error.localizedDescription
         }
     }
+    func saveSavingMode() {
+        guard !recording, AudioSavingMode(rawValue: savingMode) != nil else { return }
+        do { try store.set("saving-mode", savingMode) } catch {
+            self.error = error.localizedDescription
+        }
+    }
     func chooseLive() {
         liveRequested = true
         ensureLive()
@@ -471,6 +497,8 @@ import SwiftUI
     private func begin(device: InputDevice, enroll: Bool) {
         stopPlayback()
         do {
+            let speechOnly = !enroll && savingMode == AudioSavingMode.speechOnly.rawValue
+            let detector = speechOnly ? try SpeechVAD(project: project) : nil
             started = Date()
             let id = try store.createSession(
                 title: enroll
@@ -488,6 +516,23 @@ import SwiftUI
                     "enrollment-result", "Recording enrollment audio · profile is not saved yet")
             }
             let writer = ChunkWriter(store: store, session: id, model: model)
+            if let detector { try writer.enableSpeechOnly(vad: detector) }
+            try store.set("saving-" + id, speechOnly ? "speechOnly" : "continuous")
+            try store.set(
+                "metadata-" + id,
+                store.setting("metadata-" + id)
+                    + ";saving=\(speechOnly ? "speechOnly" : "continuous");capture-gate=\(speechOnly ? "Silero6.2CPU1thread threshold0.35/0.20 preroll1s postroll1s; offsets=elapsed" : "none")"
+            )
+            writer.onActivity = { [weak self] active in
+                DispatchQueue.main.async {
+                    guard let self, self.sessionID == id, self.recording else { return }
+                    self.savingSpeech = active
+                    self.status =
+                        active
+                        ? "Saving speech + short buffers · " + device.name
+                        : "Listening · non-speech stays in memory only · " + device.name
+                }
+            }
             writer.onLevel = { [weak self] level in
                 DispatchQueue.main.async { self?.level = min(1, level * 8) }
             }
@@ -500,6 +545,7 @@ import SwiftUI
             writer.onChunk = { [weak self] in self?.processor.schedule() }
             let feed = liveFeed
             writer.onWritten = { buffer, offset in feed.offer(buffer, offset: offset) }
+            writer.onSpanEnded = { _ in feed.endSpan() }
             self.writer = writer
             sessionID = id
             if liveRequested, !enroll, model == "unified" { startLive(for: id) }
@@ -513,7 +559,11 @@ import SwiftUI
             enrollment = enroll
             if liveRequested { ensureLive() }
             elapsed = 0
-            status = "Recording · " + device.name
+            savingSpeech = !speechOnly
+            status =
+                speechOnly
+                ? "Listening · speech-only saving · " + device.name
+                : "Recording continuously · " + device.name
             if keepAwake {
                 IOPMAssertionCreateWithName(
                     kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
@@ -536,12 +586,19 @@ import SwiftUI
         guard !syntheticMonitor else { return }
         guard recording else { return }
         let wasEnrollment = enrollment
+        var noSpeech = false
         recording = false
         enrollment = false
         do {
             try capture.stop()
             if let id = sessionID {
-                try store.finish(id, note: note)
+                let savedChunks = try store.chunks(session: id)
+                noSpeech = store.setting("saving-" + id) == "speechOnly" && savedChunks.isEmpty
+                try store.finish(
+                    id,
+                    note: note.isEmpty && noSpeech
+                        ? "No speech detected; non-speech was omitted and no audio files were saved."
+                        : note)
                 if wasEnrollment {
                     try store.set(
                         "enrollment-result",
@@ -551,14 +608,24 @@ import SwiftUI
                     if captured < 8 { self.error = store.setting("enrollment-result") }
                 }
             }
-        } catch { self.error = error.localizedDescription }
+        } catch {
+            self.error = error.localizedDescription
+            if let id = sessionID {
+                try? store.finish(
+                    id, note: "Capture finalization gap: " + error.localizedDescription)
+            }
+        }
         liveFeed.set(nil)
         liveTranscriber?.stop()
         liveStatus = "Recording saved · final alignment and speaker labels are processing"
         writer = nil
         sessionID = nil
         level = 0
-        status = note.isEmpty ? "Saved · ready for another conversation" : note
+        status =
+            note.isEmpty
+            ? (noSpeech
+                ? "No speech detected · no audio files saved"
+                : "Saved · ready for another conversation") : note
         if assertion != 0 {
             IOPMAssertionRelease(assertion)
             assertion = 0
@@ -608,11 +675,11 @@ import SwiftUI
     func play(_ segment: Segment) { playConversation(session: segment.session, at: segment.offset) }
     func playConversation(session: String, at offset: Double = 0) {
         guard !recording else { error = "Stop recording before playing saved audio."; return }
-        conversationPlayer.start(session: session, at: offset)
+        playbackNotice = ""; conversationPlayer.start(session: session, at: offset)
     }
     func pausePlayback() { conversationPlayer.pause() }
     func resumePlayback() { conversationPlayer.resume() }
-    func stopPlayback() { conversationPlayer?.stop() }
+    func stopPlayback() { conversationPlayer?.stop(); playbackNotice = "" }
     func delete(_ session: Session) {
         guard !syntheticMonitor else { return }
         guard !recording else {

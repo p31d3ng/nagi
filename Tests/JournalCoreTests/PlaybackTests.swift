@@ -78,6 +78,14 @@ import XCTest
         player.start(session: id); try await until({ player.state == .ended })
         XCTAssertEqual(player.position, 0.85, accuracy: 0.002)
     }
+    func testDocumentedOmittedSilenceSkipsButKeepsElapsedClock() async throws {
+        let id = try fixture(offsets: [0, 1]); try store.recordGap(session: id, start: 0.35, end: 1)
+        let player = ConversationPlayback(store: store); player.volume = 0;
+        var notices: [String] = []
+        player.onSkippedSilence = { notices.append($0) }
+        player.start(session: id); try await until({ player.state == .ended })
+        XCTAssertEqual(player.position, 1.35, accuracy: 0.002); XCTAssertEqual(notices.count, 1)
+    }
     func testExpiryWhilePausedStopsAndRemovesDerivedAudio() async throws {
         let id = try fixture(); let player = ConversationPlayback(store: store); player.volume = 0
         player.start(session: id); try await until({ player.state == .playing })

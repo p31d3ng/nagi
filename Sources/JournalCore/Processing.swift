@@ -133,6 +133,14 @@ public final class Processor: @unchecked Sendable {
                 "SELECT id FROM chunks WHERE session=? AND offset>? AND status!='writing' LIMIT 1",
                 [chunk.session, chunk.offset]
             )
+            .isEmpty,
+            try store.exec(
+                "SELECT 1 FROM audio_gaps WHERE session=? AND start>=? AND start<=? AND end>start AND reason='omitted_nonspeech' LIMIT 1",
+                [
+                    chunk.session, chunk.offset + chunk.duration - 0.002,
+                    chunk.offset + chunk.duration + 0.002,
+                ]
+            )
             .isEmpty
         {
             // Wait for bounded look-ahead; finishing the session releases the final chunk.

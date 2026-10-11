@@ -4,7 +4,7 @@ import Foundation
 public enum LiveResponsiveness: String, CaseIterable, Sendable {
     case balanced, accuracy
 }
-public struct LiveSnapshot: Decodable, Sendable {
+public struct LiveSnapshot: Codable, Sendable {
     public let ready: Bool?
     public let offset: Double?
     public let duration: Double?
@@ -77,7 +77,8 @@ public final class LiveTranscriber: @unchecked Sendable {
     private let project: URL
     private let responsiveness: LiveResponsiveness
     public var workerPID: Int32 { process.isRunning ? process.processIdentifier : 0 }
-    private var preRoll: [(AVAudioPCMBuffer, Double)] = []
+    private enum Event { case audio(AVAudioPCMBuffer, Double), endSpan }
+    private var preRoll: [Event] = []
     private var accepting = false
     private var stopped = false
     private var failed = false
@@ -86,6 +87,8 @@ public final class LiveTranscriber: @unchecked Sendable {
     private var reader = Data()
     private var converter: AVAudioConverter?
     private var sourceRate: Double = 0
+    private var previousInputEnd: Double?
+    private var lastInput = Date()
     private var logURL: URL?
     private var log: FileHandle?
     private var watchdog: DispatchSourceTimer?
@@ -148,7 +151,10 @@ public final class LiveTranscriber: @unchecked Sendable {
                 timer.setEventHandler { [weak self] in
                     guard let self else { return }
                     self.lock.lock();
-                    let stale = !self.stopped && Date().timeIntervalSince(self.lastProgress) > 45;
+                    let stale =
+                        !self.stopped
+                        && (!self.accepting || Date().timeIntervalSince(self.lastInput) < 3)
+                        && Date().timeIntervalSince(self.lastProgress) > 45;
                     self.lock.unlock()
                     if stale {
                         self.fail(
@@ -178,7 +184,12 @@ public final class LiveTranscriber: @unchecked Sendable {
                 let becameReady = snapshot.ready == true && !stopped
                 if becameReady {
                     accepting = true
-                    for (buffer, offset) in preRoll { queue(buffer, offset: offset) }
+                    for event in preRoll {
+                        switch event {
+                        case .audio(let buffer, let offset): queue(buffer, offset: offset)
+                        case .endSpan: queueEnd()
+                        }
+                    }
                     preRoll.removeAll(keepingCapacity: false)
                 }
                 lock.unlock()
@@ -201,14 +212,39 @@ public final class LiveTranscriber: @unchecked Sendable {
     }
     public func offer(_ buffer: AVAudioPCMBuffer, offset: Double) {
         lock.lock()
+        lastInput = Date()
         guard !stopped else { lock.unlock(); return }
         guard slots.wait(timeout: .now()) == .success else {
             lock.unlock()
             fail("Live preview fell behind; audio is safe. Returning to chunk processing.")
             return
         }
-        if accepting { queue(buffer, offset: offset) } else { preRoll.append((buffer, offset)) }
+        if accepting {
+            queue(buffer, offset: offset)
+        } else {
+            preRoll.append(.audio(buffer, offset))
+        }
         lock.unlock()
+    }
+    public func endSpan() {
+        lock.lock()
+        guard !stopped else { lock.unlock(); return }
+        guard slots.wait(timeout: .now()) == .success else {
+            lock.unlock(); fail("Live preview fell behind while finalizing speech"); return
+        }
+        if accepting { queueEnd() } else { preRoll.append(.endSpan) }
+        lock.unlock()
+    }
+    private func queueEnd() {
+        lane.async { [self] in
+            defer { slots.signal() }
+            lock.lock(); let canceled = failed; lock.unlock(); guard !canceled else { return }
+            do {
+                var marker = UInt32.max
+                try input.fileHandleForWriting.write(contentsOf: Data(bytes: &marker, count: 4))
+                converter = nil; previousInputEnd = nil
+            } catch { fail(error.localizedDescription) }
+        }
     }
     private func queue(_ buffer: AVAudioPCMBuffer, offset: Double) {
         lane.async { [self] in
@@ -219,6 +255,8 @@ public final class LiveTranscriber: @unchecked Sendable {
         }
     }
     private func send(_ buffer: AVAudioPCMBuffer, offset: Double) throws {
+        if let end = previousInputEnd, abs(offset - end) > 0.01 { converter = nil }
+        previousInputEnd = offset + Double(buffer.frameLength) / buffer.format.sampleRate
         guard let channels = buffer.floatChannelData else {
             throw JournalError("Live input requires Float32 audio")
         }
@@ -266,7 +304,7 @@ public final class LiveTranscriber: @unchecked Sendable {
     private func fail(_ message: String) {
         lock.lock(); guard !failed else { lock.unlock(); return }; failed = true; accepting = false;
         lock.unlock()
-        onStatus?("\(message) · continuous audio is still saving")
+        onStatus?("\(message) · audio saving continues under the selected mode")
         stop()
     }
     public func stop() {
@@ -318,4 +356,5 @@ public final class LiveFeed: @unchecked Sendable {
         lock.lock(); let current = target; lock.unlock()
         current?.offer(buffer, offset: offset)
     }
+    public func endSpan() { lock.lock(); let current = target; lock.unlock(); current?.endSpan() }
 }

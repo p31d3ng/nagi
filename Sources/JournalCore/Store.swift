@@ -96,6 +96,12 @@ public final class Store: @unchecked Sendable {
         )
         try exec("CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT)")
         try exec(
+            "CREATE TABLE IF NOT EXISTS audio_gaps(session TEXT REFERENCES sessions(id) ON DELETE CASCADE,start REAL,end REAL,reason TEXT,PRIMARY KEY(session,start))"
+        )
+        try exec(
+            "CREATE TABLE IF NOT EXISTS capture_progress(session TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,end REAL,mode TEXT)"
+        )
+        try exec(
             "CREATE TABLE IF NOT EXISTS live_previews(session TEXT REFERENCES sessions(id) ON DELETE CASCADE,offset REAL,duration REAL,text TEXT,final INTEGER,PRIMARY KEY(session,offset))"
         )
         try exec(
@@ -192,6 +198,21 @@ public final class Store: @unchecked Sendable {
     }
     public func finish(_ id: String, note: String = "") throws {
         try exec("UPDATE sessions SET status='finished',note=? WHERE id=?", [note, id])
+    }
+    public func recordGap(
+        session: String, start: Double, end: Double, reason: String = "omitted_nonspeech"
+    ) throws {
+        guard end > start else { return }
+        try exec(
+            "INSERT INTO audio_gaps VALUES(?,?,?,?) ON CONFLICT(session,start) DO UPDATE SET end=excluded.end,reason=excluded.reason",
+            [session, start, end, reason])
+    }
+    public func isOmittedSilence(session: String, start: Double, end: Double) -> Bool {
+        ((try? exec(
+            "SELECT 1 AS found FROM audio_gaps WHERE session=? AND start<=? AND end>=? AND reason='omitted_nonspeech' LIMIT 1",
+            [session, start + 0.002, end - 0.002]
+        )
+        .isEmpty) == false)
     }
     public func registerChunk(
         session: String, path: String, captured: Double, offset: Double, model: String

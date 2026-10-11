@@ -11,10 +11,13 @@ cp "$project/bin/ASRWorker" "$app/Contents/Resources/Runtime/bin/ASRWorker.new"
 mv "$app/Contents/Resources/Runtime/bin/ASRWorker.new" "$app/Contents/Resources/Runtime/bin/ASRWorker"
 cp "$project/bin/LiveASRWorker" "$app/Contents/Resources/Runtime/bin/LiveASRWorker.new"
 mv "$app/Contents/Resources/Runtime/bin/LiveASRWorker.new" "$app/Contents/Resources/Runtime/bin/LiveASRWorker"
+cp "$project/bin/libNagiVAD.dylib" "$app/Contents/Resources/Runtime/bin/libNagiVAD.dylib.new"
+mv "$app/Contents/Resources/Runtime/bin/libNagiVAD.dylib.new" "$app/Contents/Resources/Runtime/bin/libNagiVAD.dylib"
 cp "$project/.build/debug/SpeakerWorker" "$app/Contents/Resources/Runtime/.build/debug/SpeakerWorker.new"
 mv "$app/Contents/Resources/Runtime/.build/debug/SpeakerWorker.new" "$app/Contents/Resources/Runtime/.build/debug/SpeakerWorker"
 cp "$project/THIRD_PARTY_NOTICES.md" "$project/DEPENDENCIES.json" "$app/Contents/Resources/"
 mkdir -p "$app/Contents/Resources/Licenses"
+cp "$project/Licenses/Silero-VAD.txt" "$app/Contents/Resources/Licenses/"
 cp "$project/../Dependencies/transcribe.cpp/LICENSE" "$app/Contents/Resources/Licenses/transcribe.cpp.txt"
 cp "$project/../Dependencies/FluidAudio/LICENSE" "$app/Contents/Resources/Licenses/FluidAudio.txt"
 cp "$project/../Dependencies/transcribe.cpp/ggml/LICENSE" "$app/Contents/Resources/Licenses/ggml.txt"
@@ -36,8 +39,8 @@ plist = {
     "CFBundleDisplayName": "Nagi",
     "CFBundleExecutable": "Nagi",
     "CFBundlePackageType": "APPL",
-    "CFBundleShortVersionString": "0.2.1",
-    "CFBundleVersion": "5",
+    "CFBundleShortVersionString": "0.3.0",
+    "CFBundleVersion": "6",
     "LSMinimumSystemVersion": "15.0",
     "NSMicrophoneUsageDescription": "Record a conversation or your local voice profile only when you press Start or Enroll. Audio never uploads.",
     "NSHighResolutionCapable": True,

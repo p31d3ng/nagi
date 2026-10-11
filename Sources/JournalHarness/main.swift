@@ -16,6 +16,113 @@ do {
     }
     let store = try Store(root: URL(fileURLWithPath: args[2]))
     switch args[1] {
+    case "speechgate":
+        let source = URL(fileURLWithPath: args[3]); let project = URL(fileURLWithPath: args[4])
+        let speechOnly = args.count <= 5 || args[5] != "continuous"
+        let useLive = args.count > 6 && args[6] == "live"
+        let crashAt = args.count > 7 ? Double(args[7]) ?? -1 : -1
+        let workerKillAt = args.count > 8 ? Double(args[8]) ?? -1 : -1
+        var workerKilled = false
+        let id = try store.createSession(
+            title: "Synthetic speech gate", device: "synthetic", model: "unified")
+        let writer = ChunkWriter(store: store, session: id, model: "unified")
+        let vad = speechOnly ? try SpeechVAD(project: project) : nil
+        let gate = vad.map { SpeechGate(vad: $0) }
+        if let gate { try writer.enableSpeechOnly(gate: gate) }
+        var live: LiveTranscriber?; let ended = DispatchSemaphore(value: 0)
+        if useLive {
+            let worker = LiveTranscriber(store: store, session: id, project: project); live = worker
+            let ready = DispatchSemaphore(value: 0)
+            worker.onUpdate = { snapshot in
+                if snapshot.ready == true { ready.signal() }
+                if let text = snapshot.full, !text.isEmpty {
+                    print(String(data: try! JSONEncoder().encode(snapshot), encoding: .utf8)!)
+                }
+            }
+            worker.onFinished = { ended.signal() }; worker.onStatus = { print($0) }; worker.start()
+            guard ready.wait(timeout: .now() + 40) == .success else {
+                throw JournalError("VAD Live warmup failed")
+            }
+            writer.onWritten = { buffer, offset in worker.offer(buffer, offset: offset) }
+            writer.onSpanEnded = { _ in worker.endSpan() }
+        }
+        let input = try AVAudioFile(forReading: source);
+        let rate = input.processingFormat.sampleRate
+        let begin = Date(); var inputFrames: Int64 = 0
+        while input.framePosition < input.length {
+            try autoreleasepool {
+                let buffer = AVAudioPCMBuffer(
+                    pcmFormat: input.processingFormat, frameCapacity: 4096)!
+                try input.read(into: buffer); try writer.write(buffer);
+                inputFrames += Int64(buffer.frameLength)
+            }
+            if crashAt >= 0, Double(inputFrames) / rate >= crashAt { fflush(stdout); _exit(75) }
+            if !workerKilled, workerKillAt >= 0, Double(inputFrames) / rate >= workerKillAt,
+                let live, live.workerPID > 0
+            {
+                kill(live.workerPID, SIGKILL); workerKilled = true
+            }
+            if useLive {
+                let wait = Double(inputFrames) / rate - Date().timeIntervalSince(begin);
+                if wait > 0 { Thread.sleep(forTimeInterval: wait) }
+            }
+        }
+        try writer.finish(); try store.finish(id)
+        if let live {
+            live.stop();
+            guard ended.wait(timeout: .now() + 20) == .success else {
+                throw JournalError("VAD Live finalize timed out")
+            }
+        }
+        let wall = Date().timeIntervalSince(begin); let chunks = try store.chunks(session: id)
+        var savedFrames: Int64 = 0; var ranges: [[String: Double]] = []
+        for chunk in chunks {
+            let saved = try AVAudioFile(forReading: store.root.appendingPathComponent(chunk.path))
+            input.framePosition = Int64((chunk.offset * rate).rounded())
+            guard saved.processingFormat.sampleRate == rate,
+                saved.processingFormat.channelCount == input.processingFormat.channelCount
+            else { throw JournalError("VAD archive format changed") }
+            while saved.framePosition < saved.length {
+                let count = AVAudioFrameCount(min(4096, saved.length - saved.framePosition))
+                let a = AVAudioPCMBuffer(pcmFormat: saved.processingFormat, frameCapacity: count)!
+                let b = AVAudioPCMBuffer(pcmFormat: input.processingFormat, frameCapacity: count)!
+                try saved.read(into: a); try input.read(into: b, frameCount: count)
+                guard a.frameLength == b.frameLength else {
+                    throw JournalError("VAD sample length mismatch")
+                }
+                for c in 0..<Int(a.format.channelCount) {
+                    for i in 0..<Int(a.frameLength) {
+                        guard a.floatChannelData![c][i] == b.floatChannelData![c][i] else {
+                            throw JournalError("VAD original sample mismatch")
+                        }
+                    }
+                }
+            }
+            savedFrames += saved.length;
+            ranges.append(["start": chunk.offset, "end": chunk.offset + chunk.duration])
+            try Archive.compress(chunk, store: store)
+        }
+        let files = try FileManager.default.contentsOfDirectory(
+            at: store.root.appendingPathComponent("audio"),
+            includingPropertiesForKeys: [.fileSizeKey])
+        let bytes = try files.reduce(0) {
+            try $0 + ($1.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0)
+        }
+        let report: [String: Any] = [
+            "mode": speechOnly ? "speechOnly" : "continuous",
+            "worker_killed": workerKilled,
+            "input_seconds": Double(inputFrames) / rate,
+            "saved_seconds": Double(savedFrames) / rate, "write_vad_wall_seconds": wall,
+            "rtf": wall / (Double(inputFrames) / rate),
+            "peak_buffered_frames": gate?.peakBufferedFrames ?? 0, "compressed_bytes": bytes,
+            "audio_files": files.count, "ranges": ranges, "sample_continuity": true,
+            "gaps": try store.exec(
+                "SELECT start,end,reason FROM audio_gaps WHERE session=? ORDER BY start", [id]),
+        ]
+        print(
+            "GATE-RESULT " + String(
+                data: try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys]),
+                encoding: .utf8)!)
     case "import":
         let id = try store.createSession(
             title: "Synthetic fixture", device: "synthetic", model: "unified")
