@@ -9,7 +9,7 @@ out.mkdir(exist_ok=True)
 passages = {
     "english": (
         "Samantha",
-        "Today we planned the Stillpoint journal. The microphone receiver must never switch silently. Meet Alex on Tuesday at three. Boundary words: parakeet, Kyoto, SQLite, DJI.",
+        "Today we planned the Nagi journal. The microphone receiver must never switch silently. Meet Alex on Tuesday at three. Boundary words: parakeet, Kyoto, SQLite, DJI.",
     ),
     "english2": (
         "Daniel",

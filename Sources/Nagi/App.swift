@@ -72,9 +72,9 @@ import SwiftUI
     private var playbackChunkID: String?
     private var playbackGeneration = 0
     private let playbackLane = DispatchQueue(
-        label: "stillpoint.playback", qos: .utility, autoreleaseFrequency: .workItem)
+        label: "nagi.playback", qos: .utility, autoreleaseFrequency: .workItem)
     init() {
-        if let override = ProcessInfo.processInfo.environment["STILLPOINT_PROJECT"] {
+        if let override = ProcessInfo.processInfo.environment["NAGI_PROJECT"] {
             project = URL(fileURLWithPath: override)
         } else if let resources = Bundle.main.resourceURL,
             FileManager.default.fileExists(
@@ -93,7 +93,7 @@ import SwiftUI
         let bundledTestData =
             Bundle.main.object(forInfoDictionaryKey: "NagiSyntheticData") as? String
         let data = URL(
-            fileURLWithPath: ProcessInfo.processInfo.environment["STILLPOINT_DATA"]
+            fileURLWithPath: ProcessInfo.processInfo.environment["NAGI_DATA"]
                 ?? (syntheticMonitor
                     ? bundledTestData
                         ?? FileManager.default.temporaryDirectory
@@ -111,7 +111,7 @@ import SwiftUI
             processor = try Processor(store: store, project: project)
         } catch {
             fatalError(
-                "Local store cannot open: \(error). Choose a writable STILLPOINT_DATA folder.")
+                "Local store cannot open: \(error). Choose a writable NAGI_DATA folder.")
         }
         inputUID = store.setting("inputUID")
         model = store.setting("model", fallback: "unified")

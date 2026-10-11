@@ -66,7 +66,7 @@ public enum LocalProcess {
         let logURL =
             log
             ?? FileManager.default.temporaryDirectory.appendingPathComponent(
-                "stillpoint-\(UUID().uuidString).log")
+                "nagi-\(UUID().uuidString).log")
         FileManager.default.createFile(atPath: logURL.path, contents: nil)
         let handle = try FileHandle(forWritingTo: logURL)
         defer {
@@ -311,7 +311,7 @@ public final class ChunkWriter: @unchecked Sendable {
     private var rate: Double = 0
     private let started: Double
     private let queue = DispatchQueue(
-        label: "stillpoint.capture.write", qos: .userInitiated, autoreleaseFrequency: .workItem)
+        label: "nagi.capture.write", qos: .userInitiated, autoreleaseFrequency: .workItem)
     private let slots = DispatchSemaphore(value: 64)
     public var onLevel: ((Double) -> Void)?
     public var onError: ((String) -> Void)?

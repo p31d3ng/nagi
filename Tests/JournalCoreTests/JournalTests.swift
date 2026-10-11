@@ -8,7 +8,7 @@ final class JournalTests: XCTestCase {
     var store: Store!
     override func setUpWithError() throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "stillpoint-test-\(UUID())")
+            "nagi-test-\(UUID())")
         store = try Store(root: root)
     }
     override func tearDownWithError() throws {

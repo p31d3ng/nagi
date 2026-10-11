@@ -57,7 +57,7 @@ public final class Processor: @unchecked Sendable {
     public let store: Store
     public let project: URL
     private let lane = DispatchQueue(
-        label: "stillpoint.processing", qos: .utility, autoreleaseFrequency: .workItem)
+        label: "nagi.processing", qos: .utility, autoreleaseFrequency: .workItem)
     private let retentionLane = DispatchQueue(
         label: "nagi.audio.expiry", qos: .utility, autoreleaseFrequency: .workItem)
     private let state = NSLock()

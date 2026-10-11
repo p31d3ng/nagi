@@ -17,7 +17,7 @@ open build/Nagi.app
 
 Source dependencies live in the sibling `../Dependencies` directory. Bootstrap refuses to overwrite a different existing checkout. Build uses workspace caches and four compiler jobs. The generated app bundles runtime helpers and any installed models. After model installation, the setup script rebuilds the local app. App bundles and weights remain Git-ignored; no model weights are pushed to the source repository.
 
-On the original Studio, the complete project is `/Users/pei.deng/Documents/Codex/2026-10-10/task/Nagi`, and the app is `build/Nagi.app`. Local journal state is in `~/Library/Application Support/Nagi`; override `STILLPOINT_DATA` to use a separate test data folder and `STILLPOINT_PROJECT` to override the project path. These legacy environment keys remain supported internally.
+On the original Studio, the complete project is `/Users/pei.deng/Documents/Codex/2026-10-10/task/Nagi`, and the app is `build/Nagi.app`. Local journal state is in `~/Library/Application Support/Nagi`; override `NAGI_DATA` to use a separate test data folder and `NAGI_PROJECT` to override the project path. The default journal location and saved settings are unchanged; development overrides use the NAGI-prefixed environment keys.
 
 Choose your receiver in **Devices**, save settings, and explicitly press **Start recording**. macOS microphone permission is requested only then. Closing the window leaves the menu-bar app alive; use its Open journal action to return. Quit stops and finalizes capture. Locking the screen does not intentionally stop capture. System sleep finalizes and marks a gap; recording must be restarted after wake. Optional idle-sleep prevention applies only while recording.
 

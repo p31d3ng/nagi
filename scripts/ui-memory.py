@@ -51,7 +51,7 @@ subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-", str(test_app)], c
 log = (out / "app.log").open("w")
 app = subprocess.Popen(
     [str(test_app / "Contents/MacOS/Nagi")],
-    env=os.environ | {"STILLPOINT_DATA": str(data), "NAGI_SYNTHETIC_MONITOR": "1"},
+    env=os.environ | {"NAGI_DATA": str(data), "NAGI_SYNTHETIC_MONITOR": "1"},
     stdout=log,
     stderr=subprocess.STDOUT,
 )

@@ -1,4 +1,4 @@
-// Stillpoint adapter to the pinned transcribe.cpp public C API.
+// Nagi adapter to the pinned transcribe.cpp public C API.
 #include "transcribe.h"
 #include "wav.h"
 #include <fstream>

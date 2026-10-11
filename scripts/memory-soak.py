@@ -31,7 +31,7 @@ with plist_path.open("wb") as f:
 subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-", str(test_app)], check=True)
 app_log = (out / "app.log").open("w")
 run_log = (out / "run.log").open("w")
-env = os.environ | {"STILLPOINT_DATA": str(data), "NAGI_SYNTHETIC_MONITOR": "1"}
+env = os.environ | {"NAGI_DATA": str(data), "NAGI_SYNTHETIC_MONITOR": "1"}
 app = subprocess.Popen(
     [str(test_app / "Contents/MacOS/Nagi")], env=env, stdout=app_log, stderr=subprocess.STDOUT
 )
