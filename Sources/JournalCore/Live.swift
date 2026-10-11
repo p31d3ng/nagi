@@ -1,6 +1,9 @@
 import AVFoundation
 import Foundation
 
+public enum LiveResponsiveness: String, CaseIterable, Sendable {
+    case balanced, accuracy
+}
 public struct LiveSnapshot: Decodable, Sendable {
     public let ready: Bool?
     public let offset: Double?
@@ -72,6 +75,7 @@ public final class LiveTranscriber: @unchecked Sendable {
     private let store: Store
     private let session: String
     private let project: URL
+    private let responsiveness: LiveResponsiveness
     public var workerPID: Int32 { process.isRunning ? process.processIdentifier : 0 }
     private var preRoll: [(AVAudioPCMBuffer, Double)] = []
     private var accepting = false
@@ -88,8 +92,11 @@ public final class LiveTranscriber: @unchecked Sendable {
     public var onUpdate: ((LiveSnapshot) -> Void)?
     public var onStatus: ((String) -> Void)?
     public var onFinished: (() -> Void)?
-    public init(store: Store, session: String, project: URL) {
+    public init(
+        store: Store, session: String, project: URL, responsiveness: LiveResponsiveness = .balanced
+    ) {
         self.store = store; self.session = session; self.project = project
+        self.responsiveness = responsiveness
     }
     public func start() {
         lane.async { [self] in
@@ -110,6 +117,7 @@ public final class LiveTranscriber: @unchecked Sendable {
                 process.arguments = [
                     "-p", "(version 1)(allow default)(deny network*)",
                     project.appendingPathComponent("bin/LiveASRWorker").path, model.path,
+                    responsiveness.rawValue,
                 ]
                 process.qualityOfService = .utility
                 process.standardInput = input; process.standardOutput = output;

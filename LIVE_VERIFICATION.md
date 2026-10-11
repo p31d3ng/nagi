@@ -1,5 +1,7 @@
 # Live transcript verification
 
+The measurements below describe the 0.2.0 baseline. Nagi 0.2.1 adds event-driven text updates, a selectable shorter-context default, and continuous conversation playback; see [the new comparison](PLAYBACK_LATENCY.md).
+
 Nagi 0.2.0, Apple Silicon M1 Ultra Studio, macOS 26.6.2. English uses the pinned exact Parakeet Unified EN 0.6B Q8_0/transcribe.cpp engine. All input below was generated synthetic macOS TTS; no ambient microphone or human enrollment was performed by the test harness. All artifacts are ignored local `reports/` data.
 
 ## Behavior and resource design

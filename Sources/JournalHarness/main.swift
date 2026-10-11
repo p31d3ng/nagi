@@ -43,7 +43,10 @@ do {
         let id = try store.createSession(
             title: "Synthetic live continuity", device: "synthetic injection", model: "unified")
         let processor = try Processor(store: store, project: project)
-        let live = LiveTranscriber(store: store, session: id, project: project)
+        let live = LiveTranscriber(
+            store: store, session: id, project: project,
+            responsiveness: args.count > 9
+                ? LiveResponsiveness(rawValue: args[9]) ?? .balanced : .balanced)
         let ready = DispatchSemaphore(value: 0)
         let finished = DispatchSemaphore(value: 0)
         var began = Date()

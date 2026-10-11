@@ -173,6 +173,7 @@ struct ContentView: View {
                     LazyVStack(spacing: 10) {
                         ForEach(j.sessions) { session in
                             Button {
+                                j.stopPlayback()
                                 j.selected = session.id
                                 j.refresh()
                             } label: {
@@ -241,6 +242,24 @@ struct ContentView: View {
                                     .lineLimit(2)
                             }
                             Text(speakerSummary).font(.caption).foregroundStyle(accent)
+                            HStack {
+                                Button("Play conversation", systemImage: "play.circle.fill") {
+                                    j.playConversation(session: session.id)
+                                }
+                                .disabled(j.recording)
+                                if j.playbackSession == session.id {
+                                    Button(j.playbackState == .paused ? "Resume" : "Pause") {
+                                        j.playbackState == .paused
+                                            ? j.resumePlayback() : j.pausePlayback()
+                                    }
+                                    Button("Stop", systemImage: "stop.circle") { j.stopPlayback() }
+                                    PlaybackClock(meter: j.playbackMeter)
+                                }
+                            }
+                            Text(
+                                "Continuous audio across chunks; timestamp buttons start from that point. Sentence times are estimates."
+                            )
+                            .font(.caption).foregroundStyle(.secondary)
                             if let expiry = j.audioExpiry {
                                 Text(
                                     "Audio expires \(Date(timeIntervalSince1970:expiry).formatted()) · transcript retained."
@@ -311,8 +330,10 @@ struct ContentView: View {
                                 }
                             }
                             .padding(18).frame(maxWidth: .infinity, alignment: .leading)
-                            .background(
-                                .background, in: RoundedRectangle(cornerRadius: 14))
+                            .modifier(
+                                PlaybackHighlight(
+                                    meter: j.playbackMeter, session: segment.session,
+                                    start: segment.offset, end: segment.end, color: accent))
                         }
                         if j.playing {
                             Button("Stop playback", systemImage: "stop.circle") { j.stopPlayback() }
@@ -536,5 +557,26 @@ struct CaptureStatusBar: View {
             .buttonStyle(.borderedProminent).controlSize(.large)
             .disabled(j.syntheticMonitor)
         }
+    }
+}
+
+private struct PlaybackClock: View {
+    @ObservedObject var meter: PlaybackMeter
+    var body: some View {
+        Text(String(format: "%02d:%02d", Int(meter.position) / 60, Int(meter.position) % 60))
+            .monospacedDigit()
+    }
+}
+private struct PlaybackHighlight: ViewModifier {
+    @ObservedObject var meter: PlaybackMeter
+    let session: String
+    let start: Double
+    let end: Double
+    let color: Color
+    func body(content: Content) -> some View {
+        content.background(
+            meter.session == session && meter.position >= start && meter.position < end
+                ? color.opacity(0.13) : Color(nsColor: .textBackgroundColor),
+            in: RoundedRectangle(cornerRadius: 14))
     }
 }

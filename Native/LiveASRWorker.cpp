@@ -1,5 +1,6 @@
 // Persistent, bounded English preview stream. Archival audio remains authoritative.
 #include "transcribe.h"
+#include "transcribe/parakeet.h"
 #include <algorithm>
 #include <cstdint>
 #include <iostream>
@@ -24,7 +25,7 @@ static std::string quote(const char *s) {
     return out + "\"";
 }
 int main(int argc, char **argv) {
-    if (argc != 2)
+    if (argc < 2 || argc > 3)
         return 1;
     transcribe_model_load_params load;
     transcribe_model_load_params_init(&load);
@@ -47,6 +48,16 @@ int main(int argc, char **argv) {
             std::cerr << transcribe_status_string(s) << '\n';
         return s == TRANSCRIBE_OK;
     };
+    transcribe_parakeet_buffered_stream_ext geometry;
+    transcribe_parakeet_buffered_stream_ext_init(&geometry);
+    if (argc == 3 && std::string(argv[2]) == "balanced") {
+        geometry.left_ms = 5600;
+        geometry.chunk_ms = 560;
+        geometry.right_ms = 560;
+    }
+    transcribe_stream_params stream;
+    transcribe_stream_params_init(&stream);
+    stream.family = &geometry.ext;
     bool active = false;
     int frames = 0;
     double offset = 0;
@@ -78,7 +89,7 @@ int main(int argc, char **argv) {
             return 4;
         for (uint32_t pos = 0; pos < count;) {
             if (!active) {
-                if (!check(transcribe_stream_begin(session, nullptr, nullptr)))
+                if (!check(transcribe_stream_begin(session, nullptr, &stream)))
                     return 5;
                 active = true;
                 frames = 0;

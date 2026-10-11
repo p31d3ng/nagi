@@ -59,6 +59,8 @@ macOS TTS and Metal/Core ML need normal host access; restricted execution sandbo
 
 ## Live transcript
 
+Nagi 0.2.1 uses worker output callbacks for partial/final text and processing notifications for final transcript changes. The Live view has no text polling timer. Choose **Balanced · quicker** (default, 560 ms chunk + 560 ms right context) or **Accuracy · more context** (1,040 ms each) before recording. Model look-ahead still causes recognition latency; final archival decoding is unchanged. See [playback and latency verification](PLAYBACK_LATENCY.md) for the measured comparison and limitations.
+
 Open **Live**, select the English Unified model/input, then explicitly press **Start recording**. Opening the tab never starts a microphone. The rounded transcript panel updates as the model receives audio; tentative words are shown dimmer when the engine's stable-prefix view agrees with its current hypothesis. Scroll up to pause following and use **Jump to live** to return. Text is selectable and **Copy shown text** copies the current window. The view renders at most 200 paragraphs; **Earlier text** pages through the conversation without retaining an ever-growing UI history. Timeline search remains available for final transcripts.
 
 Audio capture, original-rate CAF sealing and lossless compression continue independently. One persistent, network-denied English worker keeps its model loaded and accepts a bounded queue of post-write buffers. Preview hypotheses use bounded 30-second windows. Their text is provisional; window boundaries and recognizer revisions can change it. Final archival alignment and Community-1 speaker analysis wait until the live worker releases its model. The number of chunks awaiting final processing is visible. A long live session can therefore take additional time to finish speaker labels after Stop. The final pipeline replaces previews by complete audio ranges and preserves edits/raw versions; it does not concatenate preview text into the final transcript.
@@ -83,6 +85,10 @@ The verified formatter versions are Xcode swift-format 6.3.0, Xcode clang-format
 ## Architecture and future work
 
 `JournalCore` owns storage, original-rate capture, compression, recovery and processing. `Native/ASRWorker.cpp` owns bounded ASR jobs. `SpeakerWorker` owns Community-1 inference. SwiftUI owns status/timeline, device/model/profile/dictionary/storage settings, search, review and playback. `SessionExporter` is the clean future Stage 2 boundary; no upload implementation exists.
+
+### Conversation playback
+
+Select a conversation in Timeline and press **Play conversation**. Playback continues automatically across recorded chunks; use **Pause**, **Resume**, or **Stop**. Clicking a transcript timestamp starts continuous playback from that point. The current sentence highlights using its estimated transcript times. Selecting another conversation stops playback. Missing/expired audio or a recording gap stops playback with an explanation; you can choose a later available timestamp explicitly. Playback is disabled during recording. Audio availability remains subject to the 48-hour expiry.
 
 Stage 2 remains future work: configurable HTTPS endpoint, R2 retention, Workers AI summaries, D1 metadata, Keychain credentials and a durable upload retry queue. Nothing is deployed.
 

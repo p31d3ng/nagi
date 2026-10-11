@@ -9,7 +9,6 @@ struct LiveView: View {
     @State private var before = Double.greatestFiniteMagnitude
     @State private var visibleSession = ""
     @State private var message = ""
-    private let updates = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     private var session: String { j.activeLiveSession ?? j.selected ?? "" }
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -24,6 +23,16 @@ struct LiveView: View {
                 .disabled(paragraphs.isEmpty)
             }
             Text(j.liveStatus).foregroundStyle(.secondary)
+            HStack {
+                Picker("Preview responsiveness", selection: $j.liveMode) {
+                    Text("Balanced · quicker").tag("balanced")
+                    Text("Accuracy · more context").tag("accuracy")
+                }
+                .frame(maxWidth: 380).disabled(j.recording || j.model != "unified")
+                Text("Preview only; final saved decoding stays unchanged.").font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .onChange(of: j.liveMode) { _, _ in j.saveLiveMode() }
             Text(
                 "Audio saves continuously. English preview words can change; final text and speaker labels follow. Other models show completed chunks. Switching tabs keeps recording and any active preview running."
             )
@@ -100,7 +109,7 @@ struct LiveView: View {
         .onAppear {
             j.chooseLive(); reload()
         }
-        .onReceive(updates) { _ in if following { reload() } }
+        .onChange(of: j.liveRevision) { _, _ in if following { reload() } }
         .onChange(of: session) { _, _ in
             following = true; before = .greatestFiniteMagnitude; reload()
         }

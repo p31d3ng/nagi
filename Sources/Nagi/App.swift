@@ -12,6 +12,10 @@ import SwiftUI
         return .terminateNow
     }
 }
+@MainActor final class PlaybackMeter: ObservableObject {
+    @Published var position = 0.0
+    @Published var session: String?
+}
 @MainActor final class CaptureMeter: ObservableObject {
     @Published var level = 0.0
     @Published var elapsed = 0
@@ -34,6 +38,8 @@ import SwiftUI
     @Published var selected: String?
     @Published var activeLiveSession: String?
     @Published var liveStatus = "Start recording explicitly to see a live conversation."
+    @Published var liveMode = "balanced"
+    @Published var liveRevision = 0
     @Published var liveEngineActive = false
     @Published var liveCommitted = ""
     @Published var liveTentative = ""
@@ -78,12 +84,10 @@ import SwiftUI
     private var assertion: IOPMAssertionID = 0
     private var previousDevices = Set<String>()
     private var lastMaintenance = Date()
-    private var player: AVAudioPlayer?
-    private var playbackURL: URL?
-    private var playbackChunkID: String?
-    private var playbackGeneration = 0
-    private let playbackLane = DispatchQueue(
-        label: "nagi.playback", qos: .utility, autoreleaseFrequency: .workItem)
+    private var conversationPlayer: ConversationPlayback!
+    @Published var playbackState: ConversationPlayback.State = .idle
+    let playbackMeter = PlaybackMeter()
+    @Published var playbackSession: String?
     init() {
         if let override = ProcessInfo.processInfo.environment["NAGI_PROJECT"] {
             project = URL(fileURLWithPath: override)
@@ -124,6 +128,23 @@ import SwiftUI
             fatalError(
                 "Local store cannot open: \(error). Choose a writable NAGI_DATA folder.")
         }
+        conversationPlayer = ConversationPlayback(store: store)
+        if syntheticMonitor { conversationPlayer.volume = 0 }
+        conversationPlayer.onChange = { [weak self] in
+            guard let self else { return }
+            let state = self.conversationPlayer.state
+            if self.playbackState != state { self.playbackState = state }
+            let position = self.conversationPlayer.position
+            if self.playbackMeter.position != position { self.playbackMeter.position = position }
+            let session = self.conversationPlayer.session
+            if self.playbackSession != session {
+                self.playbackSession = session; self.playbackMeter.session = session
+            }
+            let active = [.playing, .preparing, .paused].contains(state)
+            if self.playing != active { self.playing = active }
+        }
+        conversationPlayer.onMessage = { [weak self] message in self?.error = message }
+        liveMode = store.setting("live-mode", fallback: "balanced")
         inputUID = store.setting("inputUID")
         model = store.setting("model", fallback: "unified")
         preferredWords = store.setting("preferredWords")
@@ -157,7 +178,12 @@ import SwiftUI
                 }
             }
         }
-        processor.onChange = { [weak self] in DispatchQueue.main.async { self?.refresh() } }
+        processor.onChange = { [weak self] in
+            DispatchQueue.main.async {
+                self?.refresh()
+                self?.liveRevision += 1
+            }
+        }
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
@@ -306,11 +332,7 @@ import SwiftUI
                 stop(note: "Voice enrollment sample")
             }
         }
-        if playing && player?.isPlaying != true { stopPlayback() }
-        if let id = playbackChunkID, let chunk = try? store.chunk(id), !store.audioAvailable(chunk)
-        {
-            stopPlayback()
-        }
+
     }
     func saveSettings() {
         guard !syntheticMonitor else {
@@ -343,6 +365,12 @@ import SwiftUI
             processor.maintenance()
         } catch { self.error = error.localizedDescription }
     }
+    func saveLiveMode() {
+        guard !recording, LiveResponsiveness(rawValue: liveMode) != nil else { return }
+        do { try store.set("live-mode", liveMode) } catch {
+            self.error = error.localizedDescription
+        }
+    }
     func chooseLive() {
         liveRequested = true
         ensureLive()
@@ -357,25 +385,32 @@ import SwiftUI
         startLive(for: id)
     }
     private func startLive(for id: String) {
-        let live = LiveTranscriber(store: store, session: id, project: project)
+        let live = LiveTranscriber(
+            store: store, session: id, project: project,
+            responsiveness: LiveResponsiveness(rawValue: liveMode) ?? .balanced)
         try? store.set(
             "live-" + id,
-            "preview=Unified English;engine=5d66f602;Metal;threads=2;window=30s;commit=AUTO;bounded-feed=64;final=archival pipeline after preview exits"
+            "preview=Unified English;responsiveness=\(liveMode);engine=5d66f602;Metal;threads=2;window=30s;commit=AUTO;bounded-feed=64;final=archival pipeline after preview exits"
         )
         liveTranscriber = live
         liveEngineActive = true
         liveFeed.set(live)
         liveStatus = "Waiting for current processing job · audio continues saving"
-        live.onStatus = { [weak self] message in
-            DispatchQueue.main.async { self?.liveStatus = message }
+        live.onStatus = { [weak self, weak live] message in
+            DispatchQueue.main.async {
+                guard let self, self.liveTranscriber === live else { return }
+                self.liveStatus = message
+            }
         }
-        live.onUpdate = { [weak self] snapshot in
+        live.onUpdate = { [weak self, weak live] snapshot in
             guard let offset = snapshot.offset else { return }
             DispatchQueue.main.async {
-                self?.livePreviewOffset = offset
-                self?.liveCommitted =
+                guard let self, self.liveTranscriber === live else { return }
+                self.livePreviewOffset = offset
+                self.liveCommitted =
                     snapshot.final == true ? snapshot.full ?? "" : snapshot.committed ?? ""
-                self?.liveTentative = snapshot.final == true ? "" : snapshot.tentative ?? ""
+                self.liveTentative = snapshot.final == true ? "" : snapshot.tentative ?? ""
+                self.liveRevision += 1
             }
         }
         live.onFinished = { [weak self, weak live] in
@@ -389,6 +424,7 @@ import SwiftUI
                 self.liveTentative = ""
                 self.processor.resumeBatch()
                 self.refresh()
+                self.liveRevision += 1
             }
         }
         processor.prepareLive { live.start() }
@@ -433,6 +469,7 @@ import SwiftUI
         }
     }
     private func begin(device: InputDevice, enroll: Bool) {
+        stopPlayback()
         do {
             started = Date()
             let id = try store.createSession(
@@ -568,58 +605,14 @@ import SwiftUI
                 } catch { DispatchQueue.main.async { self?.error = error.localizedDescription } }
             }
     }
-    func play(_ segment: Segment) {
-        guard !recording else {
-            error = "Finish recording before playback to avoid recording the speaker output."
-            return
-        }
-        stopPlayback()
-        guard let chunk = try? store.chunk(segment.chunk), store.audioAvailable(chunk) else {
-            error = "Audio expired after 48 hours, or is missing. The transcript remains."
-            return
-        }
-        status = "Preparing playback…"
-        let store = store
-        let generation = playbackGeneration
-        playbackLane.async { [weak self] in
-            do {
-                let url = try Archive.decompress(chunk, store: store)
-                DispatchQueue.main.async {
-                    guard let self, self.playbackGeneration == generation, !self.recording,
-                        store.audioAvailable(chunk)
-                    else {
-                        if url.path.contains("/derived/") {
-                            try? FileManager.default.removeItem(at: url)
-                        }
-                        return
-                    }
-                    do {
-                        self.player = try AVAudioPlayer(contentsOf: url)
-                        self.player?.currentTime = max(0, segment.offset - chunk.offset)
-                        self.player?.play()
-                        self.playbackURL = url
-                        self.playbackChunkID = chunk.id
-                        self.playing = true
-                        self.status = "Playing saved audio"
-                    } catch { self.error = error.localizedDescription }
-                }
-            } catch { DispatchQueue.main.async { self?.error = error.localizedDescription } }
-        }
+    func play(_ segment: Segment) { playConversation(session: segment.session, at: segment.offset) }
+    func playConversation(session: String, at offset: Double = 0) {
+        guard !recording else { error = "Stop recording before playing saved audio."; return }
+        conversationPlayer.start(session: session, at: offset)
     }
-    func stopPlayback() {
-        playbackGeneration += 1
-        playbackChunkID = nil
-        player?.stop()
-        player = nil
-        playing = false
-        if status == "Playing saved audio" || status == "Preparing playback…" {
-            status = "Ready · playback stopped"
-        }
-        if let url = playbackURL, url.path.contains("/derived/") {
-            try? FileManager.default.removeItem(at: url)
-        }
-        playbackURL = nil
-    }
+    func pausePlayback() { conversationPlayer.pause() }
+    func resumePlayback() { conversationPlayer.resume() }
+    func stopPlayback() { conversationPlayer?.stop() }
     func delete(_ session: Session) {
         guard !syntheticMonitor else { return }
         guard !recording else {
