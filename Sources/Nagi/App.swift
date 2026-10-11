@@ -76,6 +76,7 @@ import SwiftUI
     let project: URL
     let store: Store
     let processor: Processor
+    let summaries: SummaryController
     let syntheticMonitor =
         ProcessInfo.processInfo.environment["NAGI_SYNTHETIC_MONITOR"] == "1"
         || Bundle.main.object(forInfoDictionaryKey: "NagiSyntheticTest") as? Bool == true
@@ -132,6 +133,7 @@ import SwiftUI
             fatalError(
                 "Local store cannot open: \(error). Choose a writable NAGI_DATA folder.")
         }
+        summaries = SummaryController(store: store, networkAllowed: !syntheticMonitor)
         conversationPlayer = ConversationPlayback(store: store)
         if syntheticMonitor { conversationPlayer.volume = 0 }
         conversationPlayer.onChange = { [weak self] in
@@ -279,6 +281,7 @@ import SwiftUI
                 audioExpiry = nil
                 processingFailures = []
             }
+            summaries.observe(selected: selected)
         } catch { self.error = error.localizedDescription }
     }
     func tick() {
@@ -553,6 +556,7 @@ import SwiftUI
                 try store.finish(id, note: "Could not start: \(error.localizedDescription)")
                 throw error
             }
+            if !enroll { summaries.arm(session: id) }
             selected = id
             recording = true
             activeLiveSession = id
@@ -686,6 +690,7 @@ import SwiftUI
             error = "Finish recording before deleting a session."
             return
         }
+        summaries.cancel(session: session.id)
         stopPlayback()
         status = "Deleting conversation…"
         let processor = processor

@@ -1,6 +1,6 @@
 # Nagi
 
-A native SwiftUI voice journal for macOS. Nagi (凪) means calm or a lull in the wind. This is a working Stage 1 prerelease: all capture, audio, models, transcription, speaker analysis and search stay on the Mac. No cloud endpoint or telemetry is implemented.
+A native SwiftUI voice journal for macOS. Nagi (凪) means calm or a lull in the wind. Capture, audio, models, transcription, speaker analysis and search stay on the Mac. Nagi 0.4.0 adds optional transcript-only summarization: configure an HTTPS service and app bearer in Settings, then submit a saved conversation manually or opt in for new recordings. Automatic sharing is off by default. Audio and voice profiles never upload; no telemetry is implemented.
 
 ## Build and run
 
@@ -86,13 +86,13 @@ The verified formatter versions are Xcode swift-format 6.3.0, Xcode clang-format
 
 ## Architecture and future work
 
-`JournalCore` owns storage, original-rate capture, compression, recovery and processing. `Native/ASRWorker.cpp` owns bounded ASR jobs. `SpeakerWorker` owns Community-1 inference. SwiftUI owns status/timeline, device/model/profile/dictionary/storage settings, search, review and playback. `SessionExporter` is the clean future Stage 2 boundary; no upload implementation exists.
+`JournalCore` owns storage, original-rate capture, compression, recovery and processing. `Native/ASRWorker.cpp` owns bounded ASR jobs. `SpeakerWorker` owns Community-1 inference. SwiftUI owns status/timeline, device/model/profile/dictionary/storage settings, search, review and playback. `SummaryStorage` creates checked finalized transcript snapshots; `SummaryController` owns explicit consent, durable claims and local response history; `SummaryHTTPTransport` is the bounded optional HTTPS client. The older `SessionExporter` remains a future audio-sync boundary.
 
 ### Conversation playback
 
 Select a conversation in Timeline and press **Play conversation**. Playback continues automatically across recorded chunks; use **Pause**, **Resume**, or **Stop**. Clicking a transcript timestamp starts continuous playback from that point. The current sentence highlights using its estimated transcript times. Selecting another conversation stops playback. Missing/expired audio or a recording gap stops playback with an explanation; you can choose a later available timestamp explicitly. Playback is disabled during recording. Audio availability remains subject to the 48-hour expiry.
 
-Stage 2 remains future work: configurable HTTPS endpoint, R2 retention, Workers AI summaries, D1 metadata, Keychain credentials and a durable upload retry queue. Nothing is deployed.
+Optional transcript-only summarization and Keychain settings are implemented in 0.4.0. See [setup and verification](SUMMARY_INTEGRATION.md). Audio sync, R2 retention, D1 metadata and phone access remain future work. Backend implementation and infrastructure are managed separately in a private repository; this app repository contains only the client contract and synthetic tests.
 
 ## Hardening behavior
 

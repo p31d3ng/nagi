@@ -7,6 +7,7 @@ struct ContentView: View {
     @State private var editing: Segment?
     @State private var deleteCandidate: Session?
     let accent = Color(red: 0.17, green: 0.42, blue: 0.43)
+    init(initialSection: String = "Timeline") { _section = State(initialValue: initialSection) }
     var body: some View {
         NavigationSplitView {
             VStack(alignment: .leading, spacing: 24) {
@@ -22,7 +23,7 @@ struct ContentView: View {
                 ForEach(
                     [
                         "Timeline", "Live", "Devices", "Models", "Voice profile", "Dictionary",
-                        "Storage",
+                        "Storage", "Settings",
                     ],
                     id: \.self
                 ) { name in
@@ -39,7 +40,7 @@ struct ContentView: View {
                     .buttonStyle(.plain)
                 }
                 Spacer()
-                Label("Only on this Mac", systemImage: "lock.shield").font(.callout)
+                Label("Audio stays on this Mac", systemImage: "lock.shield").font(.callout)
                     .foregroundStyle(accent)
                 Text(
                     "Audio: 48 hours\nTranscripts: until you delete them or reach your chosen cap."
@@ -120,6 +121,7 @@ struct ContentView: View {
         case "Voice profile": return "person.crop.circle"
         case "Dictionary": return "text.book.closed"
         case "Storage": return "internaldrive"
+        case "Settings": return "gearshape"
         default: return "clock"
         }
     }
@@ -227,6 +229,10 @@ struct ContentView: View {
                             Text(session.device).font(.caption).foregroundStyle(.secondary)
                                 .textSelection(
                                     .enabled)
+                            ConversationSummaryView(controller: j.summaries, session: session.id) {
+                                source in
+                                j.playConversation(session: session.id, at: source.start)
+                            }
                             Text(j.savingSummary).font(.caption).foregroundStyle(.secondary)
                             DisclosureGroup("Recording details") {
                                 Text(
@@ -363,6 +369,23 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 22) {
             Text(section).font(.largeTitle.weight(.semibold))
             switch section {
+            case "Settings":
+                SummarySettingsView(controller: j.summaries)
+                Divider()
+                Text("Customize your journal").font(.title2)
+                Text(
+                    "Existing preferences keep their current values. Open a section below to change them."
+                )
+                .foregroundStyle(.secondary)
+                HStack {
+                    ForEach(
+                        ["Devices", "Models", "Dictionary", "Storage", "Voice profile"], id: \.self
+                    ) { name in
+                        Button(name) { section = name }
+                    }
+                }
+                Toggle("Prevent idle sleep while recording", isOn: $j.keepAwake)
+                    .disabled(j.recording)
             case "Devices":
                 Text(
                     "Select the receiver you want to record. We remember its stable UID and never fall back to another input."
@@ -488,7 +511,7 @@ struct ContentView: View {
                 }
                 .disabled(!j.capEnabled)
                 Text(
-                    "At the cap, the oldest whole conversations and their audio are evicted. This counts UTF-8 raw and displayed text, original decoder outputs and correction history, not SQLite index/file overhead. Turn the cap off to keep transcripts until you delete them."
+                    "At the cap, the oldest whole conversations and their audio are evicted. This counts UTF-8 raw and displayed text, original decoder outputs, correction history and saved summaries, not SQLite index/file overhead. Turn the cap off to keep transcripts until you delete them."
                 )
                 .font(.callout).foregroundStyle(.secondary)
                 Text(j.store.root.path).font(.caption.monospaced()).textSelection(.enabled)
@@ -509,7 +532,7 @@ struct ContentView: View {
         }
     }
 }
-struct PreferencesView: View { var body: some View { ContentView() } }
+struct PreferencesView: View { var body: some View { ContentView(initialSection: "Settings") } }
 struct EditTranscript: View {
     @EnvironmentObject var j: Journal
     @Environment(\.dismiss) var dismiss

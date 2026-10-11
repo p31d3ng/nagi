@@ -17,4 +17,5 @@ let package = Package(
             dependencies: [.product(name: "FluidAudio", package: "FluidAudio")]),
         .executableTarget(name: "JournalHarness", dependencies: ["JournalCore"]),
         .testTarget(name: "JournalCoreTests", dependencies: ["JournalCore"]),
+        .testTarget(name: "SummaryAppTests", dependencies: ["Nagi", "JournalCore"]),
     ], swiftLanguageModes: [.v5])

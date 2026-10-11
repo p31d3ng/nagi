@@ -16,6 +16,35 @@ do {
     }
     let store = try Store(root: URL(fileURLWithPath: args[2]))
     switch args[1] {
+    case "summary-auth-check":
+        // Deliberately malformed credential + unfinished body cannot trigger inference.
+        let done = DispatchSemaphore(value: 0)
+        let start = Date()
+        Task.detached(priority: .utility) {
+            do {
+                let result = try await SummaryHTTPTransport()
+                    .send(
+                        endpoint: SummaryEndpoint.validate(SummaryEndpoint.suggested),
+                        body: Data("{\"final\":false}".utf8), bearer: "invalid")
+                let response =
+                    try JSONSerialization.jsonObject(with: result.body) as? [String: String]
+                guard result.status == 401, response?["error"] == "unauthorized" else {
+                    throw JournalError("Unexpected authentication smoke result; response withheld")
+                }
+                print(
+                    "Native HTTPS authentication rejection verified: HTTP 401; no inference; wall_s=\(Date().timeIntervalSince(start))"
+                )
+            } catch {
+                fputs(
+                    "Native HTTPS smoke check failed; no credential or response details displayed.\n",
+                    stderr)
+                exit(1)
+            }
+            done.signal()
+        }
+        guard done.wait(timeout: .now() + 50) == .success else {
+            throw JournalError("Native HTTPS smoke check timed out")
+        }
     case "speechgate":
         let source = URL(fileURLWithPath: args[3]); let project = URL(fileURLWithPath: args[4])
         let speechOnly = args.count <= 5 || args[5] != "continuous"

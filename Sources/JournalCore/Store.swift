@@ -121,6 +121,7 @@ public final class Store: @unchecked Sendable {
         try exec(
             "CREATE TABLE IF NOT EXISTS profiles(id TEXT PRIMARY KEY,embedding TEXT,model TEXT,created REAL)"
         )
+        try SummaryStorage.install(self)
     }
     deinit { sqlite3_close(db) }
     @discardableResult public func exec(_ sql: String, _ bindings: [Any] = []) throws -> [[String:
@@ -325,7 +326,14 @@ public final class Store: @unchecked Sendable {
             try exec(
                 "INSERT INTO versions(segment,text,created) SELECT id,corrected,? FROM segments WHERE id=?",
                 [Date().timeIntervalSince1970, id])
+            let prior = try exec("SELECT speaker FROM segments WHERE id=?", [id]).first?["speaker"]
             try exec("UPDATE segments SET corrected=?,speaker=? WHERE id=?", [text, speaker, id])
+            if prior != speaker {
+                try exec("INSERT OR REPLACE INTO summary_attribution VALUES(?,'manual')", [id])
+            }
+            try exec(
+                "UPDATE summary_changes SET revision=revision+1 WHERE session=(SELECT session FROM segments WHERE id=?)",
+                [id])
         }
     }
     public func undo(_ id: Int) throws {
@@ -371,6 +379,7 @@ public final class Store: @unchecked Sendable {
         cleanupLock.lock()
         defer { cleanupLock.unlock() }
         var removed = 0
+        try SummaryStorage.recordFinalized(self)
         while true {
             let batch = try readChunks(
                 "SELECT * FROM chunks WHERE captured<=? AND (status!='expired' OR path!='') LIMIT 128",
@@ -406,7 +415,7 @@ public final class Store: @unchecked Sendable {
         }
         if cap > 0 {
             while let size = try exec(
-                "SELECT COALESCE(SUM(length(CAST(raw AS BLOB))+length(CAST(corrected AS BLOB))),0)+(SELECT COALESCE(SUM(length(CAST(text AS BLOB))),0) FROM versions)+(SELECT COALESCE(SUM(length(CAST(streaming AS BLOB))+length(CAST(aligned AS BLOB))),0) FROM asr_runs)+(SELECT COALESCE(SUM(length(CAST(text AS BLOB))),0) FROM live_previews) AS bytes FROM segments"
+                "SELECT COALESCE(SUM(length(CAST(raw AS BLOB))+length(CAST(corrected AS BLOB))),0)+(SELECT COALESCE(SUM(length(CAST(text AS BLOB))),0) FROM versions)+(SELECT COALESCE(SUM(length(CAST(streaming AS BLOB))+length(CAST(aligned AS BLOB))),0) FROM asr_runs)+(SELECT COALESCE(SUM(length(CAST(text AS BLOB))),0) FROM live_previews) +(SELECT COALESCE(SUM(length(CAST(response AS BLOB))),0) FROM summaries) AS bytes FROM segments"
             )
             .first?["bytes"], Int(size)! > cap,
                 let oldest = try exec(
