@@ -57,6 +57,19 @@ python3 scripts/verify.py --stress
 
 macOS TTS and Metal/Core ML need normal host access; restricted execution sandboxes may generate empty TTS files or deny compiler caches. The app does not request global security changes. `VERIFICATION.md` records measured results and remaining hardware/real-speaker gaps.
 
+## Source formatting
+
+Swift, C++ and Python sources use checked-in formatter settings. Keep source readable with normal indentation and statement blocks. From the project root:
+
+```sh
+xcrun swift-format format -i -r Sources Tests Package.swift
+xcrun clang-format -i Native/ASRWorker.cpp Sources/CSQLite/shim.h
+# Optional development formatter, installed in your own Python virtual environment:
+python -m black scripts
+```
+
+The verified formatter versions are Xcode swift-format 6.3.0, Xcode clang-format, and Black 26.10.1. Formatters are development tools; the app does not depend on Python formatter packages.
+
 ## Architecture and future work
 
 `JournalCore` owns storage, original-rate capture, compression, recovery and processing. `Native/ASRWorker.cpp` owns bounded ASR jobs. `SpeakerWorker` owns Community-1 inference. SwiftUI owns status/timeline, device/model/profile/dictionary/storage settings, search, review and playback. `SessionExporter` is the clean future Stage 2 boundary; no upload implementation exists.
