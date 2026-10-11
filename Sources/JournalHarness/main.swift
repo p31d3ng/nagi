@@ -17,7 +17,7 @@ do {
         let duration=Double(args.count>5 ? args[5]:"1800")!,speed=Double(args.count>6 ? args[6]:"4")!
         let id=try store.createSession(title:"Synthetic concurrent soak",device:"synthetic injection",model:"unified")
         let processor=try Processor(store:store,project:URL(fileURLWithPath:args[4]))
-        let writer=ChunkWriter(store:store,session:id,model:"unified",started:Date().timeIntervalSince1970-duration)
+        let writer=ChunkWriter(store:store,session:id,model:"unified",started:Date().timeIntervalSince1970)
         let stats=NSLock();var gaps:[String]=[],chunks=0
         writer.onError={message in stats.lock();gaps.append(message);stats.unlock()}
         writer.onChunk={processor.schedule();stats.lock();chunks+=1;let count=chunks;stats.unlock();if count%10==0 {print("sealed=\(count) queued=\((try? store.chunks(status:"queued").count) ?? -1)");fflush(stdout)}}

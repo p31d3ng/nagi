@@ -7,8 +7,10 @@ export SWIFTPM_MODULECACHE_OVERRIDE="$project/.cache/swift"
 swift build --disable-sandbox --package-path "$project" --scratch-path "$project/.build" --cache-path "$project/.cache" -j 4
 app="$project/build/Nagi.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/Runtime/bin" "$app/Contents/Resources/Runtime/.build/debug"
-cp "$project/bin/ASRWorker" "$app/Contents/Resources/Runtime/bin/ASRWorker"
-cp "$project/.build/debug/SpeakerWorker" "$app/Contents/Resources/Runtime/.build/debug/SpeakerWorker"
+cp "$project/bin/ASRWorker" "$app/Contents/Resources/Runtime/bin/ASRWorker.new"
+mv "$app/Contents/Resources/Runtime/bin/ASRWorker.new" "$app/Contents/Resources/Runtime/bin/ASRWorker"
+cp "$project/.build/debug/SpeakerWorker" "$app/Contents/Resources/Runtime/.build/debug/SpeakerWorker.new"
+mv "$app/Contents/Resources/Runtime/.build/debug/SpeakerWorker.new" "$app/Contents/Resources/Runtime/.build/debug/SpeakerWorker"
 cp "$project/THIRD_PARTY_NOTICES.md" "$project/DEPENDENCIES.json" "$app/Contents/Resources/"
 mkdir -p "$app/Contents/Resources/Licenses"
 cp "$project/../Dependencies/transcribe.cpp/LICENSE" "$app/Contents/Resources/Licenses/transcribe.cpp.txt"
@@ -21,7 +23,8 @@ if [[ -d "$project/Models" ]]; then
   mkdir -p "$app/Contents/Resources/Runtime/Models"
   rsync -a "$project/Models/" "$app/Contents/Resources/Runtime/Models/"
 fi
-cp "$project/.build/debug/Nagi" "$app/Contents/MacOS/Nagi"
+cp "$project/.build/debug/Nagi" "$app/Contents/MacOS/Nagi.new"
+mv "$app/Contents/MacOS/Nagi.new" "$app/Contents/MacOS/Nagi"
 /usr/bin/python3 - "$app/Contents/Info.plist" "$project" <<'PY'
 import plistlib,sys
 plist={'CFBundleIdentifier':'local.nagi.journal','CFBundleName':'Nagi','CFBundleDisplayName':'Nagi','CFBundleExecutable':'Nagi','CFBundlePackageType':'APPL','CFBundleShortVersionString':'0.1.2','CFBundleVersion':'3','LSMinimumSystemVersion':'15.0','NSMicrophoneUsageDescription':'Record a conversation or your local voice profile only when you press Start or Enroll. Audio never uploads.','NSHighResolutionCapable':True,'NagiProject':sys.argv[2]}

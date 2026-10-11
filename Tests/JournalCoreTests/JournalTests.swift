@@ -21,6 +21,13 @@ final class JournalTests:XCTestCase {
         XCTAssertEqual(try processor.mapSpeakers(["speaker":vector(130)],session:id)["speaker"],"Unknown")
         XCTAssertEqual(try processor.mapSpeakers(["speaker":vector(0)],session:id)["speaker"],"Speaker 2")
     }
+    func testTimelineResultBoundWithGrowingDatabase() throws {
+        let id=try session()
+        try store.transaction {for i in 0..<10000 {try store.insertSegment(session:id,offset:Double(i),end:Double(i+1),raw:"Synthetic capacity \(i)",corrected:"Synthetic capacity \(i)",speaker:"Speaker 2",language:"en",chunk:"")}}
+        XCTAssertEqual(try store.segments(session:id).count,2000)
+        XCTAssertEqual(try store.segments(query:"capacity").count,2000)
+        XCTAssertEqual(try store.segments(session:id).last?.offset,1999)
+    }
     func testFTSSpeakerLanguageAndQuotes() throws {let id=try session();try store.insertSegment(session:id,offset:4,end:8,raw:"Meet Kyoto",corrected:"Meet Kyoto",speaker:"Me",language:"en",chunk:"");XCTAssertEqual(try store.segments(query:"Kyoto",speaker:"Me",language:"en").first?.offset,4);XCTAssertTrue(try store.segments(query:"Kyoto",speaker:"Speaker 2").isEmpty);XCTAssertNoThrow(try store.segments(query:"\" OR *"))}
     func testCorrectionHistoryRawAndUndo() throws {let id=try session();try store.insertSegment(session:id,offset:0,end:1,raw:"SQ Lite",corrected:"SQLite",speaker:"Unknown",language:"en",chunk:"");let s=try XCTUnwrap(store.segments().first);try store.edit(s.id,text:"SQLite 3",speaker:"Me");try store.undo(s.id);XCTAssertEqual(try store.segments().first?.corrected,"SQLite");XCTAssertEqual(try store.segments().first?.raw,"SQ Lite");try store.undo(s.id);XCTAssertEqual(try store.segments().first?.corrected,"SQ Lite")}
     func testCJKSubstringSearch() throws {let id=try session();try store.insertSegment(session:id,offset:5,end:9,raw:"今日は会議の計画を話します",corrected:"今日は会議の計画を話します",speaker:"Unknown",language:"ja",chunk:"");XCTAssertEqual(try store.segments(query:"会議").first?.offset,5)}

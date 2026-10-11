@@ -14,7 +14,7 @@ test_app=out/'Nagi Synthetic Test.app'
 subprocess.run(['/bin/cp','-cR',str(p/'build/Nagi.app'),str(test_app)],check=True)
 plist_path=test_app/'Contents/Info.plist'
 with plist_path.open('rb') as f:plist=plistlib.load(f)
-plist.update(CFBundleIdentifier='local.nagi.synthetic-test.'+out.name[-12:],CFBundleName='Nagi Synthetic Test',CFBundleDisplayName='Nagi Synthetic Test')
+plist.update(CFBundleIdentifier='local.nagi.synthetic-test.'+out.name[-12:],CFBundleName='Nagi Synthetic Test',CFBundleDisplayName='Nagi Synthetic Test',NagiSyntheticTest=True,NagiSyntheticData=str(data))
 with plist_path.open('wb') as f:plistlib.dump(plist,f)
 subprocess.run(['/usr/bin/codesign','--force','--sign','-',str(test_app)],check=True)
 app_log=(out/'app.log').open('w');run_log=(out/'run.log').open('w')

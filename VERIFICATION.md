@@ -84,7 +84,7 @@ The overlap worker took **2.47 seconds wall, 0.99 user, 0.19 system, 183,336,960
 
 After processing, `scripts/check-soak-audio.py` parsed the gzip CAF archives using the documented CAF endian flags and compared **every Float32 sample** to the repeated generated source. Both runs passed exact continuity. The 30-minute archive SHA-256 is `781c20144f65718ac5e15c77475fbab504efc92bdf29cb3939fa7da1edaee664`. This verifies archive continuity, not word accuracy.
 
-Parent RSS in the accelerated run rose from about **16.5 MiB to 29.2 MiB**; first/last ten-sample medians were **20.4 / 28.6 MiB**. In the real-time run, first/last five-sample medians were **18.0 / 20.1 MiB**, with final RSS **20.2 MiB**. Parent CPU median during the real-time samples was **0.55%** (ps process CPU proxy); spikes occurred at processing and finalization. The parent is the headless harness, not the SwiftUI app. RSS increased during these finite runs: **there is no demonstrated all-day memory plateau or all-day resource guarantee**. Worker processes exit per job, bounding model lifetime. A multi-hour run with representative desktop workloads remains required.
+Parent RSS in the accelerated run rose from about **16.5 MiB to 29.2 MiB**; first/last ten-sample medians were **20.4 / 28.6 MiB**. In the real-time run, first/last five-sample medians were **18.0 / 20.1 MiB**, with final RSS **20.2 MiB**. Parent CPU median during the real-time samples was **0.55%** (ps process CPU proxy); spikes occurred at processing and finalization. The parent is the headless harness, not the SwiftUI app. RSS increased during these finite runs: **there is no demonstrated all-day memory plateau or all-day resource guarantee**. Worker processes exit per job, bounding model lifetime. This checkpoint preceded v0.1.2. The subsequent two-hour real-time synthetic run is documented in MEMORY_PROFILE.md; full-day hardware and competing-workload validation remain outstanding.
 
 ### Separate operation and retention checks
 
@@ -106,3 +106,8 @@ The final unit suite has **34 tests, zero failures, 2.38 seconds**. Native UI ad
 Final integration passed with the corrected downmix: right-only 48 kHz stereo speech produced the English transcript. With a local synthetic Me profile installed, the generated overlap fixture retained text and had no Me assignments in its detected early overlap. Final logs: `reports/hardening-tests.log`, `reports/hardening-integration-final.log` (run `verify-14126275-8e88-4e54-9926-785ccb95091f`), and the two named soak folders/results/continuity records.
 
 The attribution regression also prevents a coarse segment containing meaningful sequential speech from two people from being assigned wholly to Me; such segments remain Unknown · mixed speakers. The app now clears the queued-import banner when processing finishes.
+
+
+## v0.1.2 memory investigation
+
+The complete two-hour real-time synthetic run passed: 720 chunks, 7,200 seconds, 115,200,000 accepted and independently matched samples, zero gaps, and an empty final queue. Explicit autorelease boundaries addressed the earlier retained-Foundation-object trend. See [MEMORY_PROFILE.md](MEMORY_PROFILE.md) for actual heap/RSS/CPU/disk results, the separate UI capacity control, reproducible commands, fixed test-mode labeling and remaining all-day/hardware limits.

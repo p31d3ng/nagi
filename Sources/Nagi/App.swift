@@ -46,7 +46,7 @@ import JournalCore
     let project:URL
     let store:Store
     let processor:Processor
-    let syntheticMonitor=ProcessInfo.processInfo.environment["NAGI_SYNTHETIC_MONITOR"]=="1"
+    let syntheticMonitor=ProcessInfo.processInfo.environment["NAGI_SYNTHETIC_MONITOR"]=="1" || Bundle.main.object(forInfoDictionaryKey:"NagiSyntheticTest") as? Bool == true
     private var meterTimer:Timer?
     private let capture=Capture()
     private var writer:ChunkWriter?
@@ -66,7 +66,8 @@ import JournalCore
         else if let resources=Bundle.main.resourceURL,FileManager.default.fileExists(atPath:resources.appendingPathComponent("Runtime/bin/ASRWorker").path) {project=resources.appendingPathComponent("Runtime")}
         else {project=URL(fileURLWithPath:FileManager.default.currentDirectoryPath)}
         let defaultData=FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask).first!.appendingPathComponent("Nagi")
-        let data=URL(fileURLWithPath:ProcessInfo.processInfo.environment["STILLPOINT_DATA"] ?? defaultData.path)
+        let bundledTestData=Bundle.main.object(forInfoDictionaryKey:"NagiSyntheticData") as? String
+        let data=URL(fileURLWithPath:ProcessInfo.processInfo.environment["STILLPOINT_DATA"] ?? (syntheticMonitor ? bundledTestData ?? FileManager.default.temporaryDirectory.appendingPathComponent("NagiSynthetic-"+UUID().uuidString).path:defaultData.path))
         do {store=try Store(root:data);if !syntheticMonitor {try Archive.recover(store);try store.cleanup(cap:Int(store.setting("cap",fallback:"500000000")) ?? 500000000)};processor=try Processor(store:store,project:project)} catch {fatalError("Local store cannot open: \(error). Choose a writable STILLPOINT_DATA folder.")}
         inputUID=store.setting("inputUID");model=store.setting("model",fallback:"unified");preferredWords=store.setting("preferredWords");keepAwake=store.setting("keepAwake")=="true";capEnabled=store.setting("cap",fallback:"500000000") != "0"
         let storedCap=Int(store.setting("cap",fallback:"500000000")) ?? 500000000

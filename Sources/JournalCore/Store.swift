@@ -36,6 +36,8 @@ public final class Store: @unchecked Sendable {
         try exec("CREATE INDEX IF NOT EXISTS chunks_neighbors ON chunks(session,offset)")
         try exec("CREATE INDEX IF NOT EXISTS chunks_retention ON chunks(captured) WHERE status!='expired' OR path!=''")
         try exec("CREATE INDEX IF NOT EXISTS segments_chunk ON segments(chunk)")
+        try exec("CREATE INDEX IF NOT EXISTS segments_session_offset ON segments(session,offset)")
+        try exec("CREATE INDEX IF NOT EXISTS segments_offset ON segments(offset)")
         try exec("CREATE TABLE IF NOT EXISTS profiles(id TEXT PRIMARY KEY,embedding TEXT,model TEXT,created REAL)")
     }
     deinit { sqlite3_close(db) }

@@ -71,7 +71,7 @@ Community-1 emits nonexclusive turns. A separate bounded pass of the same pinned
 
 Audio expiry runs on an independent queue while ML is busy. Derived audio has chunk ownership; context copies use the earliest source deadline. Worker TMPDIR is inside the journal, and startup removes crash-left temporary audio. Decompression consumers use separate files. Playback checks expiry and cancels interrupted preparation. Metadata retention uses indexed, bounded batches; expired empty paths can never be interpreted as the data root. All input channels contribute to level/VAD measurements, and ASR resampling explicitly enables downmixing.
 
-The transcript cap accepts 1–10,000 MB (default 500); turning it off keeps transcripts until deletion while audio still expires after 48 hours. See VERIFICATION.md for the 30-minute accelerated soak, real-time soak, boundary regressions, overlap failure/uncertainty handling and remaining multi-hour/hardware tests.
+The transcript cap accepts 1–10,000 MB (default 500); turning it off keeps transcripts until deletion while audio still expires after 48 hours. See VERIFICATION.md for the 30-minute accelerated soak, real-time soak, boundary regressions, overlap failure/uncertainty handling and the subsequent two-hour results in MEMORY_PROFILE.md and remaining full-day/hardware tests.
 
 
 ## Independent synthetic test mode
@@ -81,3 +81,7 @@ Normal use: `scripts/run-normal.sh` launches a new normal Nagi instance, even if
 `python3 scripts/memory-soak.py 7200 120` runs two hours of generated speech at real-time pace with two-minute idle controls before/after. It creates a distinct **Nagi Synthetic Test** bundle and isolated journal under `reports/`, uses the production enqueue/write/ASR/diarization paths, and observes the timeline in SwiftUI with 12.5 meter updates per second. No microphone or voice enrollment opens. The orange banner and test window title distinguish this from normal Nagi; recording/import/settings controls are disabled. An older test window may display “This synthetic monitor never opens a microphone” if Start is pressed: that is a test guard, not a microphone permission error.
 
 The controller samples process RSS/CPU, queue counts and storage, saves bounded periodic native heap/vmmap/leaks summaries, and caps journal test data at 2 GiB. Test bundles use APFS copy-on-write clones of the local app and remain Git-ignored. Idle system sleep is prevented only while the synthetic producer runs; screen lock is untouched. Native profiling may need host tool access. `python3 scripts/analyze-memory.py reports/memory-soak-<run-id>` generates local trend summaries. Raw reports, model weights, audio, transcripts and speaker embeddings are never committed.
+
+The v0.1.2 investigation and verified two-hour results are in [MEMORY_PROFILE.md](MEMORY_PROFILE.md). Timeline indexes avoid sorting an entire large conversation to display the bounded 2,000-row result.
+
+For a generated 100,000-row UI capacity control without microphone or ML: `python3 scripts/ui-memory.py 100000 300`. Test bundles retain their mode and isolated data path in Info.plist when reopened.
