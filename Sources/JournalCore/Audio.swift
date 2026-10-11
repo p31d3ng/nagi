@@ -160,6 +160,7 @@ public enum Archive {
     }
     public static func recover(_ store: Store) throws {
         try store.recover()
+        try store.exec("UPDATE live_previews SET final=1")
         _ = try store.cleanup(cap: 0)
         // No worker/playback survives app startup; remove crash-left SDK temporary audio too.
         for url in try FileManager.default.contentsOfDirectory(
@@ -316,10 +317,15 @@ public final class ChunkWriter: @unchecked Sendable {
     public var onLevel: ((Double) -> Void)?
     public var onError: ((String) -> Void)?
     public var onChunk: (() -> Void)?
+    public var onWritten: ((AVAudioPCMBuffer, Double) -> Void)?
     private var failed = false
     private var imported = false
     private let admission = NSLock()
     private var stopped = false
+    private var capturedDuration = 0.0
+    public var writtenDuration: Double {
+        admission.lock(); defer { admission.unlock() }; return capturedDuration
+    }
     public init(
         store: Store, session: String, model: String, started: Double = Date().timeIntervalSince1970
     ) {
@@ -409,8 +415,10 @@ public final class ChunkWriter: @unchecked Sendable {
             throw JournalError("Input format changed; finalize and start a new recording.")
         }
         try file!.write(from: buffer)
+        onWritten?(buffer, Double(total) / rate)
         frames += Int64(buffer.frameLength)
         total += Int64(buffer.frameLength)
+        admission.lock(); capturedDuration = Double(total) / rate; admission.unlock()
         if let data = buffer.floatChannelData {
             var peak = 0.0
             for channel in 0..<Int(buffer.format.channelCount) {

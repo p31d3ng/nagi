@@ -111,3 +111,8 @@ The attribution regression also prevents a coarse segment containing meaningful 
 ## v0.1.2 memory investigation
 
 The complete two-hour real-time synthetic run passed: 720 chunks, 7,200 seconds, 115,200,000 accepted and independently matched samples, zero gaps, and an empty final queue. Explicit autorelease boundaries addressed the earlier retained-Foundation-object trend. See [MEMORY_PROFILE.md](MEMORY_PROFILE.md) for actual heap/RSS/CPU/disk results, the separate UI capacity control, reproducible commands, fixed test-mode labeling and remaining all-day/hardware limits.
+
+
+## Live transcript and enrollment update
+
+See `LIVE_VERIFICATION.md` for the persistent English preview adapter, 49 passing regressions, synthetic archive-continuity/crash/backpressure/retention tests, actual resource measurements and limits. Final speaker analysis is deliberately deferred during Live; multilingual updates remain chunk-based.

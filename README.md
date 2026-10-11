@@ -57,13 +57,23 @@ python3 scripts/verify.py --stress
 
 macOS TTS and Metal/Core ML need normal host access; restricted execution sandboxes may generate empty TTS files or deny compiler caches. The app does not request global security changes. `VERIFICATION.md` records measured results and remaining hardware/real-speaker gaps.
 
+## Live transcript
+
+Open **Live**, select the English Unified model/input, then explicitly press **Start recording**. Opening the tab never starts a microphone. The rounded transcript panel updates as the model receives audio; tentative words are shown dimmer when the engine's stable-prefix view agrees with its current hypothesis. Scroll up to pause following and use **Jump to live** to return. Text is selectable and **Copy shown text** copies the current window. The view renders at most 200 paragraphs; **Earlier text** pages through the conversation without retaining an ever-growing UI history. Timeline search remains available for final transcripts.
+
+Audio capture, original-rate CAF sealing and lossless compression continue independently. One persistent, network-denied English worker keeps its model loaded and accepts a bounded queue of post-write buffers. Preview hypotheses use bounded 30-second windows. Their text is provisional; window boundaries and recognizer revisions can change it. Final archival alignment and Community-1 speaker analysis wait until the live worker releases its model. The number of chunks awaiting final processing is visible. A long live session can therefore take additional time to finish speaker labels after Stop. The final pipeline replaces previews by complete audio ranges and preserves edits/raw versions; it does not concatenate preview text into the final transcript.
+
+Once activated during a recording, preview keeps running across tab switches/window closure. A new recording started outside Live uses the ordinary chunk pipeline. Stop releases the live worker before final ML runs. Worker failure/overload returns to chunk processing; audio capture remains independent. **Resume live preview** retries during an ongoing recording. Multilingual Whisper currently shows completed chunk updates, with no incremental-preview claim. There is no subsecond-latency guarantee; see `LIVE_VERIFICATION.md` for measured synthetic results and resource limits.
+
+Voice enrollment now saves a profile only after the complete sample has passed checks. It combines consistent Community-1 embeddings from usable chunks, ignores tiny stop tails, and preserves a previous profile on failure. No-frame capture is stopped visibly after roughly five seconds. Watch input levels during enrollment and wait for **Local voice profile saved successfully**; a finished recording alone is not a saved profile.
+
 ## Source formatting
 
 Swift, C++ and Python sources use checked-in formatter settings. Keep source readable with normal indentation and statement blocks. From the project root:
 
 ```sh
 xcrun swift-format format -i -r Sources Tests Package.swift
-xcrun clang-format -i Native/ASRWorker.cpp Sources/CSQLite/shim.h
+xcrun clang-format -i Native/*.cpp Sources/CSQLite/shim.h
 # Optional development formatter, installed in your own Python virtual environment:
 python -m black scripts
 ```

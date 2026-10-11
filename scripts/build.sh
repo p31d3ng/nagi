@@ -9,6 +9,8 @@ app="$project/build/Nagi.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/Runtime/bin" "$app/Contents/Resources/Runtime/.build/debug"
 cp "$project/bin/ASRWorker" "$app/Contents/Resources/Runtime/bin/ASRWorker.new"
 mv "$app/Contents/Resources/Runtime/bin/ASRWorker.new" "$app/Contents/Resources/Runtime/bin/ASRWorker"
+cp "$project/bin/LiveASRWorker" "$app/Contents/Resources/Runtime/bin/LiveASRWorker.new"
+mv "$app/Contents/Resources/Runtime/bin/LiveASRWorker.new" "$app/Contents/Resources/Runtime/bin/LiveASRWorker"
 cp "$project/.build/debug/SpeakerWorker" "$app/Contents/Resources/Runtime/.build/debug/SpeakerWorker.new"
 mv "$app/Contents/Resources/Runtime/.build/debug/SpeakerWorker.new" "$app/Contents/Resources/Runtime/.build/debug/SpeakerWorker"
 cp "$project/THIRD_PARTY_NOTICES.md" "$project/DEPENDENCIES.json" "$app/Contents/Resources/"
@@ -34,8 +36,8 @@ plist = {
     "CFBundleDisplayName": "Nagi",
     "CFBundleExecutable": "Nagi",
     "CFBundlePackageType": "APPL",
-    "CFBundleShortVersionString": "0.1.2",
-    "CFBundleVersion": "3",
+    "CFBundleShortVersionString": "0.2.0",
+    "CFBundleVersion": "4",
     "LSMinimumSystemVersion": "15.0",
     "NSMicrophoneUsageDescription": "Record a conversation or your local voice profile only when you press Start or Enroll. Audio never uploads.",
     "NSHighResolutionCapable": True,

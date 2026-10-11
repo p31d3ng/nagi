@@ -33,6 +33,126 @@ do {
         try processor.retry()
         measure("processing") { processor.waitUntilIdle() }
         print(try store.segments().map(\.raw).joined(separator: "\n"))
+    case "live":
+        // Synthetic production write path plus persistent live preview. No microphone is opened.
+        let source = URL(fileURLWithPath: args[3])
+        let project = URL(fileURLWithPath: args[4])
+        let duration = args.count > 5 ? Double(args[5])! : 60
+        let killAt = args.count > 6 ? Double(args[6])! : -1
+        let liveSpeed = args.count > 7 ? Double(args[7])! : 1
+        let id = try store.createSession(
+            title: "Synthetic live continuity", device: "synthetic injection", model: "unified")
+        let processor = try Processor(store: store, project: project)
+        let live = LiveTranscriber(store: store, session: id, project: project)
+        let ready = DispatchSemaphore(value: 0)
+        let finished = DispatchSemaphore(value: 0)
+        var began = Date()
+        live.onUpdate = { snapshot in
+            if snapshot.ready == true { ready.signal() }
+            if let text = snapshot.full, !text.isEmpty {
+                let object: [String: Any] = [
+                    "event": "text", "wall": Date().timeIntervalSince(began),
+                    "offset": snapshot.offset ?? 0,
+                    "audio": snapshot.duration ?? 0, "final": snapshot.final ?? false, "text": text,
+                ]
+                print(
+                    String(
+                        data: try! JSONSerialization.data(
+                            withJSONObject: object, options: [.sortedKeys]), encoding: .utf8)!)
+                fflush(stdout)
+            }
+        }
+        live.onStatus = {
+            print("live-status=" + $0); fflush(stdout)
+        }
+        live.onFinished = {
+            processor.resumeBatch(); finished.signal()
+        }
+        processor.prepareLive { live.start() }
+        if args.count <= 8 || args[8] != "capture" {
+            guard ready.wait(timeout: .now() + 40) == .success else {
+                live.stop(); throw JournalError("Live worker did not become ready")
+            }
+            print("LIVE-READY warmup=\(Date().timeIntervalSince(began))")
+            began = Date()
+        } else {
+            print("LIVE-WARMUP capture begins before model readiness")
+            began = Date()
+        }
+        let writer = ChunkWriter(store: store, session: id, model: "unified")
+        writer.onWritten = { buffer, offset in live.offer(buffer, offset: offset) }
+        writer.onChunk = { processor.schedule() }
+        let f = try AVAudioFile(forReading: source)
+        let fixtureRate = f.processingFormat.sampleRate
+        let total = Int64(duration * fixtureRate)
+        var sent: Int64 = 0
+        var killed = false
+        while sent < total {
+            try autoreleasepool {
+                let n = AVAudioFrameCount(min(1280, min(total - sent, f.length - f.framePosition)))
+                if n == 0 { f.framePosition = 0; return }
+                let b = AVAudioPCMBuffer(pcmFormat: f.processingFormat, frameCapacity: n)!
+                try f.read(into: b)
+                guard writer.enqueue(b) else {
+                    throw JournalError("Synthetic archive admission failed")
+                }
+                sent += Int64(b.frameLength)
+            }
+            if !killed, killAt >= 0, Double(sent) / fixtureRate >= killAt {
+                let pid = live.workerPID
+                if pid > 0 { kill(pid, SIGKILL) }; killed = true
+            }
+            let wait = Double(sent) / fixtureRate / liveSpeed - Date().timeIntervalSince(began)
+            if wait > 0 { Thread.sleep(forTimeInterval: wait) }
+        }
+        try writer.finish()
+        try store.finish(id)
+        live.stop()
+        guard finished.wait(timeout: .now() + 20) == .success else {
+            throw JournalError("Live worker did not finish")
+        }
+        processor.waitUntilIdle()
+        _ = try LiveDocument.page(store, session: id)
+        let chunks = try store.chunks(session: id)
+        var recovered: Int64 = 0
+        let audit = try AVAudioFile(forReading: source)
+        // Compare every original Float32 sample, not merely duration or byte counts.
+        for chunk in chunks {
+            let archived = try Archive.decompress(chunk, store: store)
+            defer {
+                if archived.path.contains("/derived/") {
+                    try? FileManager.default.removeItem(at: archived)
+                }
+            }
+            let recorded = try AVAudioFile(forReading: archived)
+            while recorded.framePosition < recorded.length {
+                let n = AVAudioFrameCount(
+                    min(
+                        4096,
+                        min(
+                            recorded.length - recorded.framePosition,
+                            audit.length - audit.framePosition)))
+                if n == 0 { audit.framePosition = 0; continue }
+                let actual = AVAudioPCMBuffer(
+                    pcmFormat: recorded.processingFormat, frameCapacity: n)!
+                let expected = AVAudioPCMBuffer(
+                    pcmFormat: audit.processingFormat, frameCapacity: n)!
+                try recorded.read(into: actual); try audit.read(into: expected)
+                for channel in 0..<Int(actual.format.channelCount) {
+                    for i in 0..<Int(actual.frameLength) {
+                        guard
+                            actual.floatChannelData![channel][i]
+                                == expected.floatChannelData![channel][i]
+                        else { throw JournalError("Archive sample mismatch") }
+                    }
+                }
+                recovered += Int64(actual.frameLength)
+            }
+        }
+        guard recovered == total else { throw JournalError("Archive frame count mismatch") }
+        print(
+            "LIVE-PASS session=\(id) frames=\(recovered) chunks=\(chunks.count) wall=\(Date().timeIntervalSince(began)) killed=\(killed)"
+        )
     case "soak":
         let duration = Double(args.count > 5 ? args[5] : "1800")!
         let speed = Double(args.count > 6 ? args[6] : "4")!

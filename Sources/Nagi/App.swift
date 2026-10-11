@@ -32,6 +32,16 @@ import SwiftUI
     @Published var processingFailures: [String] = []
     @Published var sessions: [Session] = []
     @Published var selected: String?
+    @Published var activeLiveSession: String?
+    @Published var liveStatus = "Start recording explicitly to see a live conversation."
+    @Published var liveEngineActive = false
+    @Published var liveCommitted = ""
+    @Published var liveTentative = ""
+    @Published var livePreviewOffset = -1.0
+    var liveRequested = false
+    private let liveFeed = LiveFeed()
+    private var liveTranscriber: LiveTranscriber?
+
     @Published var segments: [Segment] = []
     @Published var devices: [InputDevice] = []
     @Published var inputUID = ""
@@ -50,6 +60,7 @@ import SwiftUI
     @Published var capEnabled = true
     @Published var capMegabytes = "500"
     @Published var profileReady = false
+    @Published var enrollmentResult = ""
     @Published var enrollment = false
     @Published var playing = false
     let project: URL
@@ -190,15 +201,20 @@ import SwiftUI
                 language: languageFilter)
             if sessions != nextSessions { sessions = nextSessions }
             if segments != nextSegments { segments = nextSegments }
-            let ready = !(try store.exec("SELECT id FROM profiles")).isEmpty
+            let ready =
+                !(try store.exec(
+                    "SELECT id FROM profiles WHERE id='Me' AND model=?", [Enrollment.model]))
+                .isEmpty
             if profileReady != ready { profileReady = ready }
+            let result = store.setting("enrollment-result")
+            if enrollmentResult != result { enrollmentResult = result }
             let choices = Array(Set((try store.segments(session: selected)).map(\.speaker)))
                 .sorted()
             if speakerChoices != choices { speakerChoices = choices }
             if let selected {
                 recordingDetails =
                     store.setting("metadata-" + selected) + "\n"
-                    + store.setting("format-" + selected)
+                    + store.setting("format-" + selected) + "\n" + store.setting("live-" + selected)
                 audioExpiry = try store
                     .exec(
                         "SELECT MIN(captured) AS first FROM chunks WHERE session=? AND path!='' AND captured>?",
@@ -242,6 +258,28 @@ import SwiftUI
             lastMaintenance = Date()
             processor.maintenance()
         }
+        if liveTranscriber != nil, let id = sessionID {
+            let queued =
+                (try? store
+                    .exec(
+                        "SELECT COUNT(*) AS n FROM chunks WHERE session=? AND status='queued'", [id]
+                    )
+                    .first?["n"]) ?? "0"
+            processing = "Live preview · \(queued) chunks await final alignment and speakers"
+        }
+        if !recording, liveTranscriber == nil, let id = activeLiveSession {
+            let pending =
+                (try? store
+                    .exec(
+                        "SELECT COUNT(*) AS n FROM chunks WHERE session=? AND status IN ('queued','processing','needs_speakers','failed')",
+                        [id]
+                    )
+                    .first?["n"]) ?? "0"
+            liveStatus =
+                pending == "0"
+                ? "Saved transcript · final processing complete"
+                : "Recording saved · \(pending) chunks need final processing; see Timeline for failures"
+        }
         let current = Devices.inputs()
         let ids = Set(current.map(\.id))
         if devices != current { devices = current }
@@ -259,7 +297,14 @@ import SwiftUI
         previousDevices = ids
         if recording {
             elapsed = Int(Date().timeIntervalSince(started))
-            if enrollment && elapsed >= 20 { stop(note: "Voice enrollment sample") }
+            if elapsed >= 5, let writer, writer.writtenDuration == 0 {
+                let message =
+                    "The selected input delivered no audio frames. Check receiver connection and input levels, then start again."
+                stop(note: message)
+                error = message
+            } else if enrollment && elapsed >= 20 {
+                stop(note: "Voice enrollment sample")
+            }
         }
         if playing && player?.isPlaying != true { stopPlayback() }
         if let id = playbackChunkID, let chunk = try? store.chunk(id), !store.audioAvailable(chunk)
@@ -298,7 +343,62 @@ import SwiftUI
             processor.maintenance()
         } catch { self.error = error.localizedDescription }
     }
+    func chooseLive() {
+        liveRequested = true
+        ensureLive()
+    }
+    private func ensureLive() {
+        guard recording, !enrollment, let id = sessionID, liveTranscriber == nil else { return }
+        guard model == "unified" else {
+            liveStatus =
+                "Multilingual model · completed chunk updates; incremental preview is English only."
+            return
+        }
+        startLive(for: id)
+    }
+    private func startLive(for id: String) {
+        let live = LiveTranscriber(store: store, session: id, project: project)
+        try? store.set(
+            "live-" + id,
+            "preview=Unified English;engine=5d66f602;Metal;threads=2;window=30s;commit=AUTO;bounded-feed=64;final=archival pipeline after preview exits"
+        )
+        liveTranscriber = live
+        liveEngineActive = true
+        liveFeed.set(live)
+        liveStatus = "Waiting for current processing job · audio continues saving"
+        live.onStatus = { [weak self] message in
+            DispatchQueue.main.async { self?.liveStatus = message }
+        }
+        live.onUpdate = { [weak self] snapshot in
+            guard let offset = snapshot.offset else { return }
+            DispatchQueue.main.async {
+                self?.livePreviewOffset = offset
+                self?.liveCommitted =
+                    snapshot.final == true ? snapshot.full ?? "" : snapshot.committed ?? ""
+                self?.liveTentative = snapshot.final == true ? "" : snapshot.tentative ?? ""
+            }
+        }
+        live.onFinished = { [weak self, weak live] in
+            DispatchQueue.main.async {
+                guard let self, self.liveTranscriber === live else { return }
+                self.liveFeed.set(nil)
+                self.liveTranscriber = nil
+                self.liveEngineActive = false
+                self.livePreviewOffset = -1
+                self.liveCommitted = ""
+                self.liveTentative = ""
+                self.processor.resumeBatch()
+                self.refresh()
+            }
+        }
+        processor.prepareLive { live.start() }
+    }
     func start(enroll: Bool = false) {
+        guard recording || liveTranscriber == nil else {
+            error =
+                "Finishing the previous live preview. Please wait a moment before starting again."
+            return
+        }
         guard !syntheticMonitor else {
             error =
                 "This is the synthetic soak test window. Recording controls are disabled, and no microphone is opened. Launch normal Nagi with scripts/run-normal.sh to record explicitly in your regular journal. The test will keep running separately."
@@ -345,7 +445,11 @@ import SwiftUI
                 "engine=5d66f602;model=\(Models.all.first{$0.id==model}!.revision);threads=2;backend=metal;capture=original-rate CAF + gzip;vad=RMS 0.0001;language=script estimate;preferred=\(preferredWords);rules=\(store.setting("rules"));diarization=Community1/fc8c3e4 nonexclusive + precluster overlap; unified=streaming canonical / approximate offline times / 0.75s context / midpoint ownership; chunk=10s exact"
             )
             try store.set("rules-" + id, store.setting("rules", fallback: "[]"))
-            if enroll { try store.set("enrollment-session", id) }
+            if enroll {
+                try store.set("enrollment-session", id)
+                try store.set(
+                    "enrollment-result", "Recording enrollment audio · profile is not saved yet")
+            }
             let writer = ChunkWriter(store: store, session: id, model: model)
             writer.onLevel = { [weak self] level in
                 DispatchQueue.main.async { self?.level = min(1, level * 8) }
@@ -357,15 +461,20 @@ import SwiftUI
                 }
             }
             writer.onChunk = { [weak self] in self?.processor.schedule() }
+            let feed = liveFeed
+            writer.onWritten = { buffer, offset in feed.offer(buffer, offset: offset) }
+            self.writer = writer
+            sessionID = id
+            if liveRequested, !enroll, model == "unified" { startLive(for: id) }
             do { try capture.start(device: device, writer: writer) } catch {
                 try store.finish(id, note: "Could not start: \(error.localizedDescription)")
                 throw error
             }
-            self.writer = writer
-            sessionID = id
             selected = id
             recording = true
+            activeLiveSession = id
             enrollment = enroll
+            if liveRequested { ensureLive() }
             elapsed = 0
             status = "Recording · " + device.name
             if keepAwake {
@@ -376,6 +485,12 @@ import SwiftUI
             }
             refresh()
         } catch {
+            try? capture.stop()
+            liveFeed.set(nil)
+            liveTranscriber?.stop()
+            writer = nil
+            sessionID = nil
+            recording = false
             self.error = error.localizedDescription
             enrollment = false
         }
@@ -383,12 +498,26 @@ import SwiftUI
     func stop(note: String = "") {
         guard !syntheticMonitor else { return }
         guard recording else { return }
+        let wasEnrollment = enrollment
         recording = false
         enrollment = false
         do {
             try capture.stop()
-            if let id = sessionID { try store.finish(id, note: note) }
+            if let id = sessionID {
+                try store.finish(id, note: note)
+                if wasEnrollment {
+                    try store.set(
+                        "enrollment-result",
+                        "Checking saved enrollment sample · wait for confirmation")
+                    try Enrollment.finalize(store)
+                    let captured = try store.chunks(session: id).reduce(0) { $0 + $1.duration }
+                    if captured < 8 { self.error = store.setting("enrollment-result") }
+                }
+            }
         } catch { self.error = error.localizedDescription }
+        liveFeed.set(nil)
+        liveTranscriber?.stop()
+        liveStatus = "Recording saved · final alignment and speaker labels are processing"
         writer = nil
         sessionID = nil
         level = 0
@@ -531,6 +660,8 @@ import SwiftUI
     func forgetProfile() {
         guard !syntheticMonitor else { return }
         do {
+            try store.set("enrollment-finalized-session", store.setting("enrollment-session"))
+            try store.set("enrollment-result", "Local voice profile deleted")
             try store.exec("DELETE FROM profiles")
             profileReady = false
         } catch { self.error = error.localizedDescription }

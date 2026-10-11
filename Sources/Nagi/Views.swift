@@ -20,7 +20,10 @@ struct ContentView: View {
                     .foregroundStyle(
                         .secondary)
                 ForEach(
-                    ["Timeline", "Devices", "Models", "Voice profile", "Dictionary", "Storage"],
+                    [
+                        "Timeline", "Live", "Devices", "Models", "Voice profile", "Dictionary",
+                        "Storage",
+                    ],
                     id: \.self
                 ) { name in
                     Button {
@@ -61,6 +64,8 @@ struct ContentView: View {
                 Divider()
                 if section == "Timeline" {
                     timeline
+                } else if section == "Live" {
+                    LiveView()
                 } else {
                     ScrollView {
                         settingsSection.disabled(j.syntheticMonitor).padding(32)
@@ -73,6 +78,10 @@ struct ContentView: View {
             .background(Color(nsColor: .windowBackgroundColor))
         }
         .tint(accent)
+        .onChange(of: section) { _, value in
+            j.liveRequested = value == "Live"
+            if value == "Live" { j.chooseLive() }
+        }
         .alert(
             j.syntheticMonitor ? "Synthetic test mode" : "Needs attention",
             isPresented: Binding(get: { j.error != nil }, set: { if !$0 { j.error = nil } })
@@ -105,6 +114,7 @@ struct ContentView: View {
     }
     func icon(_ name: String) -> String {
         switch name {
+        case "Live": return "text.bubble"
         case "Devices": return "mic"
         case "Models": return "cpu"
         case "Voice profile": return "person.crop.circle"
@@ -388,6 +398,10 @@ struct ContentView: View {
                 )
                 .font(.callout).foregroundStyle(.secondary)
             case "Voice profile":
+                if !j.enrollmentResult.isEmpty {
+                    Text(j.enrollmentResult)
+                        .foregroundStyle(j.profileReady ? Color.secondary : Color.orange)
+                }
                 Label(
                     j.profileReady ? "Local voice profile enrolled" : "No voice profile yet",
                     systemImage: "person.crop.circle.badge.checkmark"

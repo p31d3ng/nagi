@@ -96,7 +96,13 @@ public final class Store: @unchecked Sendable {
         )
         try exec("CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT)")
         try exec(
+            "CREATE TABLE IF NOT EXISTS live_previews(session TEXT REFERENCES sessions(id) ON DELETE CASCADE,offset REAL,duration REAL,text TEXT,final INTEGER,PRIMARY KEY(session,offset))"
+        )
+        try exec(
             "CREATE TABLE IF NOT EXISTS speaker_vectors(session TEXT,label TEXT,embedding TEXT,PRIMARY KEY(session,label))"
+        )
+        try exec(
+            "CREATE TABLE IF NOT EXISTS enrollment_vectors(session TEXT REFERENCES sessions(id) ON DELETE CASCADE,chunk TEXT PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,embedding TEXT)"
         )
         try exec("CREATE INDEX IF NOT EXISTS chunks_queue ON chunks(status,captured,offset)")
         try exec("CREATE INDEX IF NOT EXISTS chunks_neighbors ON chunks(session,offset)")
@@ -379,7 +385,7 @@ public final class Store: @unchecked Sendable {
         }
         if cap > 0 {
             while let size = try exec(
-                "SELECT COALESCE(SUM(length(CAST(raw AS BLOB))+length(CAST(corrected AS BLOB))),0)+(SELECT COALESCE(SUM(length(CAST(text AS BLOB))),0) FROM versions)+(SELECT COALESCE(SUM(length(CAST(streaming AS BLOB))+length(CAST(aligned AS BLOB))),0) FROM asr_runs) AS bytes FROM segments"
+                "SELECT COALESCE(SUM(length(CAST(raw AS BLOB))+length(CAST(corrected AS BLOB))),0)+(SELECT COALESCE(SUM(length(CAST(text AS BLOB))),0) FROM versions)+(SELECT COALESCE(SUM(length(CAST(streaming AS BLOB))+length(CAST(aligned AS BLOB))),0) FROM asr_runs)+(SELECT COALESCE(SUM(length(CAST(text AS BLOB))),0) FROM live_previews) AS bytes FROM segments"
             )
             .first?["bytes"], Int(size)! > cap,
                 let oldest = try exec(

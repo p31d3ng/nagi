@@ -61,6 +61,7 @@ public final class Processor: @unchecked Sendable {
     private let retentionLane = DispatchQueue(
         label: "nagi.audio.expiry", qos: .utility, autoreleaseFrequency: .workItem)
     private let state = NSLock()
+    private var livePaused = false
     private var scheduled = false
     private var lastCleanup = Date.distantPast
     public var onStatus: ((String) -> Void)?
@@ -71,6 +72,14 @@ public final class Processor: @unchecked Sendable {
         try store.exec(
             "CREATE TABLE IF NOT EXISTS speaker_vectors(session TEXT,label TEXT,embedding TEXT,PRIMARY KEY(session,label))"
         )
+    }
+    public func prepareLive(_ ready: @escaping () -> Void) {
+        state.lock(); livePaused = true; state.unlock()
+        lane.async { ready() }
+    }
+    public func resumeBatch() {
+        state.lock(); livePaused = false; state.unlock()
+        schedule()
     }
     public func schedule() {
         state.lock()
@@ -112,6 +121,8 @@ public final class Processor: @unchecked Sendable {
         schedule()
     }
     private func readyChunk() throws -> Chunk? {
+        state.lock(); let paused = livePaused; state.unlock()
+        if paused { return nil }
         guard let chunk = try store.chunks(status: "queued", limit: 1).first else { return nil }
         if !store.audioAvailable(chunk) { return chunk }
         if chunk.model == "unified", store.setting("enrollment-session") != chunk.session,
@@ -131,6 +142,21 @@ public final class Processor: @unchecked Sendable {
     }
     private func drain() {
         do {
+            state.lock(); let previewActive = livePaused; state.unlock()
+            if previewActive {
+                // Compression is cheap, contains no ML and shares the serialized archive lane.
+                // Keep original-rate audio compressed during long live sessions too.
+                let pending = try store.exec(
+                    "SELECT id FROM chunks WHERE status='queued' AND path LIKE '%.caf' ORDER BY captured LIMIT 8"
+                )
+                for row in pending {
+                    if let id = row["id"], let chunk = try store.chunk(id),
+                        store.audioAvailable(chunk)
+                    {
+                        try autoreleasepool { try Archive.compress(chunk, store: store) }
+                    }
+                }
+            }
             while let chunk = try readyChunk() {
                 // A continuous backlog must not starve retention behind the drain loop.
                 if Date().timeIntervalSince(lastCleanup) >= 60 {
@@ -151,6 +177,9 @@ public final class Processor: @unchecked Sendable {
                 onChange?()
             }
         } catch { onStatus?(error.localizedDescription) }
+        do { try Enrollment.finalize(store); onChange?() } catch {
+            onStatus?(error.localizedDescription)
+        }
         onStatus?("Idle · audio stays on this Mac")
     }
     private func process(_ original: Chunk) throws {
@@ -237,6 +266,11 @@ public final class Processor: @unchecked Sendable {
         let speakerWorker = project.appendingPathComponent(".build/debug/SpeakerWorker")
         let models = project.appendingPathComponent("Models/Community1")
         var speakers: SpeakerResult?
+        if isEnrollment, chunk.duration < 8 {
+            // A tiny timer/stop tail is archived but cannot provide a reliable embedding.
+            try store.exec("UPDATE chunks SET status='done' WHERE id=?", [chunk.id])
+            return
+        }
         do {
             let remaining = chunk.captured + 172800 - Date().timeIntervalSince1970
             guard remaining > 0 else { throw JournalError("Audio expired; its transcript remains") }
@@ -289,8 +323,8 @@ public final class Processor: @unchecked Sendable {
             }
             let encoded = String(data: try JSONEncoder().encode(embedding), encoding: .utf8)!
             try store.exec(
-                "INSERT OR REPLACE INTO profiles VALUES('Me',?,'Community1/fc8c3e4',?)",
-                [encoded, Date().timeIntervalSince1970])
+                "INSERT OR REPLACE INTO enrollment_vectors VALUES(?,?,?)",
+                [chunk.session, chunk.id, encoded])
             try store.exec("UPDATE chunks SET status='done' WHERE id=?", [chunk.id])
             return
         }
