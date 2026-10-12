@@ -19,7 +19,7 @@ Source dependencies live in the sibling `../Dependencies` directory. Bootstrap r
 
 On the original Studio, the complete project is `/Users/pei.deng/Documents/Codex/2026-10-10/task/Nagi`, and the app is `build/Nagi.app`. Local journal state is in `~/Library/Application Support/Nagi`; override `NAGI_DATA` to use a separate test data folder and `NAGI_PROJECT` to override the project path. The default journal location and saved settings are unchanged; development overrides use the NAGI-prefixed environment keys.
 
-Choose your receiver in **Devices**, save settings, and explicitly press **Start recording**. macOS microphone permission is requested only then. Closing the window leaves the menu-bar app alive; use its Open journal action to return. Quit stops and finalizes capture. Locking the screen does not intentionally stop capture. System sleep finalizes and marks a gap; recording must be restarted after wake. Optional idle-sleep prevention applies only while recording.
+Choose your receiver in **Settings → Devices**, save settings, and explicitly press **Start recording**. Microphone access is requested only through explicit Start/Enroll or Settings → Permissions actions. Closing the window leaves the menu-bar app alive; use its Open journal action to return. Quit stops and finalizes capture. Locking the screen does not intentionally stop capture. System sleep finalizes and marks a gap; recording must be restarted after wake. Optional idle-sleep prevention applies only while recording.
 
 Use **Import audio** to test with files without opening a microphone. Imported audio expiry starts at import time, since the original capture time is unknown. Generated fixtures and demo sessions are explicitly synthetic.
 
@@ -59,7 +59,7 @@ macOS TTS and Metal/Core ML need normal host access; restricted execution sandbo
 
 ## Live transcript
 
-Nagi 0.3.0 defaults new recordings to **Speech only** saving. Change it in **Storage → Saving for new recordings**. A local CPU speech detector keeps short pre/post buffers and records omitted intervals on the original timeline. Existing audio is unchanged; enrollment/imports stay continuous. Playback skips documented non-speech while reporting the time jump. See [speech saving verification](SPEECH_SAVING.md) for behavior, measurements and limitations.
+Nagi 0.3.0 defaults new recordings to **Speech only** saving. Change it in **Settings → Storage → Saving for new recordings**. A local CPU speech detector keeps short pre/post buffers and records omitted intervals on the original timeline. Existing audio is unchanged; enrollment/imports stay continuous. Playback skips documented non-speech while reporting the time jump. See [speech saving verification](SPEECH_SAVING.md) for behavior, measurements and limitations.
 
 Nagi 0.2.1 uses worker output callbacks for partial/final text and processing notifications for final transcript changes. The Live view has no text polling timer. Choose **Balanced · quicker** (default, 560 ms chunk + 560 ms right context) or **Accuracy · more context** (1,040 ms each) before recording. Model look-ahead still causes recognition latency; final archival decoding is unchanged. See [playback and latency verification](PLAYBACK_LATENCY.md) for the measured comparison and limitations.
 
@@ -120,3 +120,7 @@ For a generated 100,000-row UI capacity control without microphone or ML: `pytho
 ## Microphone permission check
 
 Nagi 0.4.1 adds **Settings → Permissions** with the actual macOS microphone status, an explicit first-access request, read-only refresh on activation, and recovery instructions. Device connection is shown separately. See [permission behavior and repeated-prompt investigation](PERMISSIONS.md). Development builds remain ad-hoc signed; this UI does not guarantee permission persistence across rebuilds.
+
+## Unified Settings and visible version
+
+In 0.4.2, **Settings** contains Permissions, Summarization, Devices, Models, Storage, Voice profile and Dictionary. The sidebar is Timeline / Live / Settings. Version appears in the sidebar; version and build details appear in Settings, read from the installed bundle. See [navigation and verification](SETTINGS.md).

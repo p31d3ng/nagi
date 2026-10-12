@@ -102,8 +102,8 @@ struct PermissionsView: View {
                 inputConnected
                     ? "Selected input is connected"
                     : hasInputs
-                        ? "No connected input selected · choose one in Devices"
-                        : "No audio input devices detected · connect your receiver and check Devices",
+                        ? "No connected input selected · choose one in Settings → Devices"
+                        : "No audio input devices detected · connect your receiver and check Settings → Devices",
                 systemImage: inputConnected ? "mic" : "cable.connector"
             )
             .font(.callout)

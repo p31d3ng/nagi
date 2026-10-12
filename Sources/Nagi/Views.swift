@@ -4,10 +4,20 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject var j: Journal
     @State private var section = "Timeline"
+    @State private var settingsPage = "Permissions"
+    private let settingsPages = [
+        "Permissions", "Summarization", "Devices", "Models", "Storage", "Voice profile",
+        "Dictionary",
+    ]
     @State private var editing: Segment?
     @State private var deleteCandidate: Session?
     let accent = Color(red: 0.17, green: 0.42, blue: 0.43)
-    init(initialSection: String = "Timeline") { _section = State(initialValue: initialSection) }
+    init(initialSection: String = "Timeline") {
+        let main =
+            ["Timeline", "Live", "Settings"].contains(initialSection) ? initialSection : "Settings"
+        _section = State(initialValue: main)
+        _settingsPage = State(initialValue: main == initialSection ? "Permissions" : initialSection)
+    }
     var body: some View {
         NavigationSplitView {
             VStack(alignment: .leading, spacing: 24) {
@@ -21,10 +31,7 @@ struct ContentView: View {
                     .foregroundStyle(
                         .secondary)
                 ForEach(
-                    [
-                        "Timeline", "Live", "Devices", "Models", "Voice profile", "Dictionary",
-                        "Storage", "Settings",
-                    ],
+                    ["Timeline", "Live", "Settings"],
                     id: \.self
                 ) { name in
                     Button {
@@ -40,6 +47,8 @@ struct ContentView: View {
                     .buttonStyle(.plain)
                 }
                 Spacer()
+                Text(AppVersion.current.sidebar).font(.caption).foregroundStyle(.secondary)
+                    .textSelection(.enabled)
                 Label("Audio stays on this Mac", systemImage: "lock.shield").font(.callout)
                     .foregroundStyle(accent)
                 Text(
@@ -69,7 +78,7 @@ struct ContentView: View {
                     LiveView()
                 } else {
                     ScrollView {
-                        settingsSection.disabled(j.syntheticMonitor).padding(32)
+                        settingsSection.padding(32)
                             .frame(
                                 maxWidth: 800, alignment: .leading)
                     }
@@ -122,6 +131,8 @@ struct ContentView: View {
         case "Dictionary": return "text.book.closed"
         case "Storage": return "internaldrive"
         case "Settings": return "gearshape"
+        case "Permissions": return "lock.shield"
+        case "Summarization": return "sparkles"
         default: return "clock"
         }
     }
@@ -301,7 +312,7 @@ struct ContentView: View {
                                     !j.query.isEmpty
                                         ? "Try another word or clear the speaker and language filters."
                                         : j.sessions.isEmpty
-                                            ? "Choose your receiver in Devices, then start recording. You can also import a local audio file."
+                                            ? "Choose your receiver in Settings → Devices, then start recording. You can also import a local audio file."
                                             : j.selected == nil
                                                 ? "Select a recent conversation to review its transcript and playback."
                                                 : "Audio chunks are durable. Processing status and recovery options appear above; silence has no transcript."
@@ -367,29 +378,41 @@ struct ContentView: View {
     }
     @ViewBuilder var settingsSection: some View {
         VStack(alignment: .leading, spacing: 22) {
-            Text(section).font(.largeTitle.weight(.semibold))
-            switch section {
-            case "Settings":
+            Text("Settings").font(.largeTitle.weight(.semibold))
+            Text("Nagi · " + AppVersion.current.details).font(.callout).foregroundStyle(.secondary)
+                .textSelection(.enabled)
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), spacing: 8)], spacing: 8) {
+                ForEach(settingsPages, id: \.self) { name in
+                    Button {
+                        settingsPage = name
+                    } label: {
+                        Label(name, systemImage: icon(name))
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(10)
+                            .background(
+                                settingsPage == name ? accent.opacity(0.13) : .clear,
+                                in: RoundedRectangle(cornerRadius: 10))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(settingsPage == name ? .isSelected : [])
+                }
+            }
+            Divider()
+            settingsPageContent.disabled(j.syntheticMonitor)
+        }
+    }
+    @ViewBuilder var settingsPageContent: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            if !["Permissions", "Summarization"].contains(settingsPage) {
+                Label(settingsPage, systemImage: icon(settingsPage)).font(.title2.weight(.semibold))
+            }
+            switch settingsPage {
+            case "Permissions":
                 PermissionsView(
                     permission: j.microphonePermission,
                     inputConnected: j.devices.contains { $0.id == j.inputUID },
                     hasInputs: !j.devices.isEmpty, requestsDisabled: j.syntheticMonitor)
+            case "Summarization":
                 SummarySettingsView(controller: j.summaries)
-                Divider()
-                Text("Customize your journal").font(.title2)
-                Text(
-                    "Existing preferences keep their current values. Open a section below to change them."
-                )
-                .foregroundStyle(.secondary)
-                HStack {
-                    ForEach(
-                        ["Devices", "Models", "Dictionary", "Storage", "Voice profile"], id: \.self
-                    ) { name in
-                        Button(name) { section = name }
-                    }
-                }
-                Toggle("Prevent idle sleep while recording", isOn: $j.keepAwake)
-                    .disabled(j.recording)
             case "Devices":
                 Text(
                     "Select the receiver you want to record. We remember its stable UID and never fall back to another input."
@@ -491,7 +514,7 @@ struct ContentView: View {
                     "Rules apply after ASR to future jobs. They are case-sensitive and may replace substrings. Raw text and previous corrections are retained; use Undo or edit in the timeline."
                 )
                 .font(.callout).foregroundStyle(.secondary)
-            default:
+            case "Storage":
                 Picker("Saving for new recordings", selection: $j.savingMode) {
                     Text("Speech only · default").tag(AudioSavingMode.speechOnly.rawValue)
                     Text("Continuous audio").tag(AudioSavingMode.continuous.rawValue)
@@ -524,11 +547,13 @@ struct ContentView: View {
                     j.processor.maintenance()
                 }
                 Text(
-                    "While the app or Mac is off, deletion cannot run. On startup and wake expired files are removed; playback is disabled once expiry passes. No uploads, account, or cloud endpoint is present."
+                    "While the app or Mac is off, deletion cannot run. On startup and wake expired files are removed; playback is disabled once expiry passes. Audio stays local; optional transcript summaries are configured in Settings → Summarization."
                 )
                 .font(.callout).foregroundStyle(.secondary)
+            default:
+                EmptyView()
             }
-            if section != "Voice profile" {
+            if !["Voice profile", "Permissions", "Summarization"].contains(settingsPage) {
                 Button("Save settings") { j.saveSettings() }.buttonStyle(.borderedProminent)
                     .disabled(
                         j.recording)

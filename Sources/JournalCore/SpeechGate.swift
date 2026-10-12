@@ -20,7 +20,8 @@ public final class SpeechVAD {
                 project.appendingPathComponent("bin/libNagiVAD.dylib").path, RTLD_NOW | RTLD_LOCAL)
         else {
             throw JournalError(
-                "Speech detector unavailable. Rebuild Nagi or choose Continuous audio in Storage.")
+                "Speech detector unavailable. Rebuild Nagi or choose Continuous audio in Settings → Storage."
+            )
         }
         guard let c = dlsym(lib, "nagi_vad_create"), let s = dlsym(lib, "nagi_vad_score"),
             let f = dlsym(lib, "nagi_vad_free")
@@ -34,7 +35,7 @@ public final class SpeechVAD {
         else {
             dlclose(lib);
             throw JournalError(
-                "Speech detector model could not load. Install the Silero model or choose Continuous audio in Storage. Recording has not started."
+                "Speech detector model could not load. Install the Silero model or choose Continuous audio in Settings → Storage. Recording has not started."
             )
         }
         library = lib; handle = instance; score = unsafeBitCast(s, to: Score.self);

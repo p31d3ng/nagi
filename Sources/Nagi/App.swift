@@ -478,7 +478,7 @@ import SwiftUI
         guard !recording else { return }
         guard let device = devices.first(where: { $0.id == inputUID }) else {
             error =
-                "Choose a connected input device in Devices. Recording never falls back to another microphone."
+                "Choose a connected input device in Settings → Devices. Recording never falls back to another microphone."
             return
         }
         microphonePermission.refresh()
@@ -498,7 +498,7 @@ import SwiftUI
                 Devices.inputs().contains(where: { $0.id == device.id })
             else {
                 self.error =
-                    "Selected input changed or disconnected. Select it in Devices and start again."
+                    "Selected input changed or disconnected. Select it in Settings → Devices and start again."
                 return
             }
             self.begin(device: device, enroll: enroll)
