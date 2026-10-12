@@ -363,6 +363,14 @@ import SwiftUI
         }
 
     }
+    func selectInput(_ uid: String) {
+        guard !syntheticMonitor else { return }
+        do {
+            try InputSelection.persist(
+                uid: uid, devices: devices, recording: recording, store: store)
+            inputUID = uid
+        } catch { self.error = error.localizedDescription }
+    }
     func saveSettings() {
         guard !syntheticMonitor else {
             error =
@@ -753,8 +761,11 @@ import SwiftUI
             "Nagi", systemImage: journal.recording ? "record.circle.fill" : "waveform.circle"
         ) { MenuView().environmentObject(journal) }
         Settings {
-            PreferencesView().environmentObject(journal).frame(width: 660, height: 630).padding(24)
+            PreferencesView().environmentObject(journal)
+                .background(SettingsWindowSizing().frame(width: 0, height: 0))
+                .frame(minWidth: 660, idealWidth: 900, minHeight: 630, idealHeight: 700)
         }
+        .windowResizability(.contentMinSize)
     }
 }
 struct MenuView: View {
@@ -777,5 +788,45 @@ struct MenuView: View {
             journal.stop(note: "App quit")
             NSApp.terminate(nil)
         }
+    }
+}
+
+// Settings scenes can retain a non-resizable AppKit style despite flexible SwiftUI bounds.
+// Limit this adjustment to the view's own Settings window, never another app/window.
+private struct SettingsWindowSizing: NSViewRepresentable {
+    final class Host: NSView {
+        private var fixtureApplied = false
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            configureWindow()
+        }
+        func configureWindow() {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let window = self.window else { return }
+                if !window.styleMask.contains(.resizable) { window.styleMask.insert(.resizable) }
+                let minimum = NSSize(width: 660, height: 630)
+                if window.contentMinSize != minimum { window.contentMinSize = minimum }
+                if window.contentMaxSize.width < 100_000 || window.contentMaxSize.height < 100_000 {
+                    window.contentMaxSize = NSSize(width: 100_000, height: 100_000)
+                }
+                if window.toolbarStyle != .unifiedCompact { window.toolbarStyle = .unifiedCompact }
+                if let toolbar = window.toolbar, toolbar.centeredItemIdentifiers != [] {
+                    toolbar.centeredItemIdentifiers = []
+                }
+                // Deterministic geometry fixtures only in recording/network-disabled test mode.
+                let env = ProcessInfo.processInfo.environment
+                if !self.fixtureApplied, env["NAGI_SYNTHETIC_MONITOR"] == "1",
+                    let value = env["NAGI_SETTINGS_TEST_WIDTH"], let width = Double(value),
+                    (660...2000).contains(width)
+                {
+                    self.fixtureApplied = true
+                    window.setContentSize(NSSize(width: width, height: 700))
+                }
+            }
+        }
+    }
+    func makeNSView(context: Context) -> NSView { Host() }
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView as? Host)?.configureWindow()
     }
 }

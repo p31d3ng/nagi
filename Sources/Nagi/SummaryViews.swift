@@ -21,15 +21,14 @@ struct SummarySettingsView: View {
             .font(.caption).foregroundStyle(.secondary)
             SecureField("Original app bearer · not deploy token or SHA-256 digest", text: $bearer)
                 .textFieldStyle(.roundedBorder)
-            HStack {
-                Button("Save bearer in Keychain") {
-                    let value = bearer; bearer = ""; controller.saveBearer(value)
+            ViewThatFits(in: .horizontal) {
+                HStack {
+                    saveBearerButton; removeBearerButton
                 }
-                .disabled(bearer.isEmpty)
-                Button("Remove saved bearer", role: .destructive) {
-                    bearer = ""; controller.forgetBearer()
+                .fixedSize(horizontal: true, vertical: false)
+                VStack(alignment: .leading, spacing: 8) {
+                    saveBearerButton; removeBearerButton
                 }
-                .disabled(!controller.credentialAvailable)
             }
             Label(
                 controller.credentialAvailable
@@ -61,6 +60,19 @@ struct SummarySettingsView: View {
         }
         .padding(20).background(.background, in: RoundedRectangle(cornerRadius: 14))
     }
+    private var saveBearerButton: some View {
+        Button("Save bearer in Keychain") {
+            let value = bearer; bearer = ""; controller.saveBearer(value)
+        }
+        .disabled(bearer.isEmpty)
+    }
+    private var removeBearerButton: some View {
+        Button("Remove saved bearer", role: .destructive) {
+            bearer = ""; controller.forgetBearer()
+        }
+        .disabled(!controller.credentialAvailable)
+    }
+
 }
 struct ConversationSummaryView: View {
     @ObservedObject var controller: SummaryController

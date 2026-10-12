@@ -124,3 +124,9 @@ Nagi 0.4.1 adds **Settings → Permissions** with the actual macOS microphone st
 ## Unified Settings and visible version
 
 In 0.4.2, **Settings** contains Permissions, Summarization, Devices, Models, Storage, Voice profile and Dictionary. The sidebar is Timeline / Live / Settings. Version appears in the sidebar; version and build details appear in Settings, read from the installed bundle. See [navigation and verification](SETTINGS.md).
+
+## Rebuild/install and quick input
+
+Quit Nagi, then run `./scripts/rebuild-install.sh` to rebuild and install `/Applications/Nagi.app`. The script refuses a running app, stages/verifies the complete bundle, keeps a recoverable previous copy, and never launches or changes user data. See [installation, permissions and tests](INSTALL.md).
+
+Nagi 0.4.3 adds the input picker beside Start recording, synchronized with Settings → Devices. Settings uses the available pane width, and the Live empty state is centered. See [behavior and verification](QUICK_INPUT_LAYOUT.md).

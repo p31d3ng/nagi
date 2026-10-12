@@ -63,17 +63,6 @@ struct LiveView: View {
                                 following = false; before = first.offset; reload()
                             }
                         }
-                        if paragraphs.isEmpty {
-                            ContentUnavailableView(
-                                j.recording
-                                    ? "Listening for speech" : "Your conversation appears here",
-                                systemImage: "text.bubble",
-                                description: Text(
-                                    j.recording
-                                        ? "Audio is saving while the local model prepares text."
-                                        : "Choose an input, then press Start recording. Opening this tab never starts the microphone."
-                                ))
-                        }
                         ForEach(paragraphs) { row in
                             VStack(alignment: .leading, spacing: 5) {
                                 Text(time(row.offset) + " · " + row.detail).font(.caption)
@@ -95,7 +84,22 @@ struct LiveView: View {
                 .onChange(of: following) { _, value in
                     if value { proxy.scrollTo("live-bottom", anchor: .bottom) }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(.background, in: RoundedRectangle(cornerRadius: 16))
+                .overlay {
+                    if paragraphs.isEmpty {
+                        ContentUnavailableView(
+                            j.recording ? "Listening for speech" : "Your conversation appears here",
+                            systemImage: "text.bubble",
+                            description: Text(
+                                j.recording
+                                    ? "Audio is saving while the local model prepares text."
+                                    : "Choose an input, then press Start recording. Opening this tab never starts the microphone."
+                            )
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                }
                 .overlay(RoundedRectangle(cornerRadius: 16).stroke(.quaternary))
             }
             Text(

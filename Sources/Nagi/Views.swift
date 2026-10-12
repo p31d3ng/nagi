@@ -4,6 +4,7 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject var j: Journal
     @State private var section = "Timeline"
+    @State private var sidebarVisibility: NavigationSplitViewVisibility = .all
     @State private var settingsPage = "Permissions"
     private let settingsPages = [
         "Permissions", "Summarization", "Devices", "Models", "Storage", "Voice profile",
@@ -19,7 +20,7 @@ struct ContentView: View {
         _settingsPage = State(initialValue: main == initialSection ? "Permissions" : initialSection)
     }
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $sidebarVisibility) {
             VStack(alignment: .leading, spacing: 24) {
                 HStack {
                     Image(systemName: "waveform.circle.fill").font(.largeTitle)
@@ -60,6 +61,12 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
             }
             .padding(20).navigationSplitViewColumnWidth(220)
+            .toolbar(removing: .sidebarToggle)
+            .toolbar {
+                if sidebarVisibility != .detailOnly {
+                    ToolbarItem(placement: .navigation) { sidebarButton }
+                }
+            }
         } detail: {
             VStack(spacing: 0) {
                 if j.syntheticMonitor {
@@ -80,12 +87,19 @@ struct ContentView: View {
                     ScrollView {
                         settingsSection.padding(32)
                             .frame(
-                                maxWidth: 800, alignment: .leading)
+                                maxWidth: .infinity, alignment: .leading)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
             }
             .background(Color(nsColor: .windowBackgroundColor))
+            .toolbar(removing: .sidebarToggle)
+        }
+        .toolbar(removing: .sidebarToggle)
+        .toolbar {
+            if sidebarVisibility == .detailOnly {
+                ToolbarItem(placement: .navigation) { sidebarButton }
+            }
         }
         .tint(accent)
         .onChange(of: section) { _, value in
@@ -121,6 +135,15 @@ struct ContentView: View {
             Text("This also deletes its original and corrected transcript versions.")
         }
         .sheet(item: $editing) { segment in EditTranscript(segment: segment).environmentObject(j) }
+    }
+    private var sidebarButton: some View {
+        Button {
+            sidebarVisibility = sidebarVisibility == .detailOnly ? .all : .detailOnly
+        } label: {
+            Image(systemName: "sidebar.left")
+        }
+        .help(sidebarVisibility == .detailOnly ? "Show sidebar" : "Hide sidebar")
+        .accessibilityLabel(sidebarVisibility == .detailOnly ? "Show sidebar" : "Hide sidebar")
     }
     func icon(_ name: String) -> String {
         switch name {
@@ -418,7 +441,8 @@ struct ContentView: View {
                     "Select the receiver you want to record. We remember its stable UID and never fall back to another input."
                 )
                 .foregroundStyle(.secondary)
-                Picker("Input", selection: $j.inputUID) {
+                Picker("Input", selection: Binding(get: { j.inputUID }, set: { j.selectInput($0) }))
+                {
                     Text("Choose an input").tag("")
                     ForEach(j.devices) { Text($0.name).tag($0.id) }
                     if !j.inputUID.isEmpty, !j.devices.contains(where: { $0.id == j.inputUID }) {
@@ -600,13 +624,25 @@ struct CaptureStatusBar: View {
     @ObservedObject var meter: CaptureMeter
     let accent: Color
     var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 16) {
+                statusInfo
+                Spacer(minLength: 8)
+                captureControls
+            }
+            VStack(alignment: .leading, spacing: 12) {
+                statusInfo
+                captureControls
+            }
+        }
+    }
+    private var statusInfo: some View {
         HStack(spacing: 16) {
             Circle().fill(j.recording ? .red : accent).frame(width: 12, height: 12)
             VStack(alignment: .leading, spacing: 5) {
                 Text(j.status).font(.headline)
                 Text(j.processing).font(.caption).foregroundStyle(.secondary)
             }
-            Spacer()
             if j.recording && meter.level < 0.0008 && meter.elapsed > 8 {
                 Text("Input is quiet · check TX / receiver").font(.caption).foregroundStyle(.orange)
             }
@@ -615,14 +651,45 @@ struct CaptureStatusBar: View {
                     .monospacedDigit()
                 ProgressView(value: meter.level).frame(width: 90).accessibilityLabel("Input level")
             }
-            Button(
-                j.syntheticMonitor
-                    ? "Test controls disabled" : j.recording ? "Stop & save" : "Start recording",
-                systemImage: j.recording ? "stop.fill" : "record.circle"
-            ) { j.recording ? j.stop() : j.start() }
-            .buttonStyle(.borderedProminent).controlSize(.large)
-            .disabled(j.syntheticMonitor)
         }
+    }
+    private var captureControls: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: 12) {
+                inputPicker; recordingButton
+            }
+            VStack(alignment: .leading, spacing: 10) {
+                inputPicker; recordingButton
+            }
+        }
+    }
+    private var inputPicker: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Picker("Input", selection: Binding(get: { j.inputUID }, set: { j.selectInput($0) })) {
+                Text(j.devices.isEmpty ? "No inputs available" : "Choose an input").tag("")
+                ForEach(j.devices) { Text($0.name).tag($0.id) }
+                if !j.inputUID.isEmpty, !j.devices.contains(where: { $0.id == j.inputUID }) {
+                    Text("Selected input disconnected").tag(j.inputUID)
+                }
+            }
+            .frame(width: 220).disabled(j.recording || j.syntheticMonitor)
+            .accessibilityLabel("Recording input")
+            Text(
+                j.recording
+                    ? "Stop recording to change input"
+                    : InputSelection.message(uid: j.inputUID, devices: j.devices)
+            )
+            .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+            .frame(width: 220, alignment: .leading)
+        }
+    }
+    private var recordingButton: some View {
+        Button(
+            j.syntheticMonitor
+                ? "Test controls disabled" : j.recording ? "Stop & save" : "Start recording",
+            systemImage: j.recording ? "stop.fill" : "record.circle"
+        ) { j.recording ? j.stop() : j.start() }
+        .buttonStyle(.borderedProminent).controlSize(.large).disabled(j.syntheticMonitor)
     }
 }
 
