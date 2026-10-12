@@ -130,3 +130,7 @@ In 0.4.2, **Settings** contains Permissions, Summarization, Devices, Models, Sto
 Quit Nagi, then run `./scripts/rebuild-install.sh` to rebuild and install `/Applications/Nagi.app`. The script refuses a running app, stages/verifies the complete bundle, keeps a recoverable previous copy, and never launches or changes user data. See [installation, permissions and tests](INSTALL.md).
 
 Nagi 0.4.3 adds the input picker beside Start recording, synchronized with Settings → Devices. Settings uses the available pane width, and the Live empty state is centered. See [behavior and verification](QUICK_INPUT_LAYOUT.md).
+
+## Navigation clicks
+
+Nagi 0.4.4 makes the full navigation row clickable, including trailing whitespace, and explicitly allows activation clicks on navigation buttons. Live-page database reads run off the main actor with bounded coalescing. See [evidence and limits](NAVIGATION.md).

@@ -41,11 +41,14 @@ struct ContentView: View {
                         Label(name, systemImage: icon(name))
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(10)
+                            .contentShape(Rectangle())
                             .background(
                                 section == name ? accent.opacity(0.13) : .clear,
                                 in: RoundedRectangle(cornerRadius: 10))
                     }
                     .buttonStyle(.plain)
+                    .allowsWindowActivationEvents(true)
+                    .accessibilityAddTraits(section == name ? .isSelected : [])
                 }
                 Spacer()
                 Text(AppVersion.current.sidebar).font(.caption).foregroundStyle(.secondary)
@@ -411,11 +414,13 @@ struct ContentView: View {
                     } label: {
                         Label(name, systemImage: icon(name))
                             .frame(maxWidth: .infinity, alignment: .leading).padding(10)
+                            .contentShape(Rectangle())
                             .background(
                                 settingsPage == name ? accent.opacity(0.13) : .clear,
                                 in: RoundedRectangle(cornerRadius: 10))
                     }
                     .buttonStyle(.plain)
+                    .allowsWindowActivationEvents(true)
                     .accessibilityAddTraits(settingsPage == name ? .isSelected : [])
                 }
             }

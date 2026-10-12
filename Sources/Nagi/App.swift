@@ -262,30 +262,36 @@ import SwiftUI
                                 [selected]
                             )
                             .first?["duration"] ?? "0") ?? 0
-                savingSummary =
+                let nextSavingSummary =
                     store.setting("saving-" + selected) == "speechOnly"
                     ? "Speech-only audio · \(Int(omitted)) seconds of non-speech omitted · original elapsed timestamps"
                     : "Continuous audio"
-                recordingDetails =
+                if savingSummary != nextSavingSummary { savingSummary = nextSavingSummary }
+                let nextRecordingDetails =
                     store.setting("metadata-" + selected) + "\n"
                     + store.setting("format-" + selected) + "\n" + store.setting("live-" + selected)
-                audioExpiry = try store
+                if recordingDetails != nextRecordingDetails {
+                    recordingDetails = nextRecordingDetails
+                }
+                let nextExpiry = try store
                     .exec(
                         "SELECT MIN(captured) AS first FROM chunks WHERE session=? AND path!='' AND captured>?",
                         [selected, Date().timeIntervalSince1970 - 172800]
                     )
                     .first?["first"]
                     .flatMap(Double.init).map { $0 + 172800 }
-                processingFailures =
+                if audioExpiry != nextExpiry { audioExpiry = nextExpiry }
+                let nextFailures =
                     try store.exec(
                         "SELECT error FROM chunks WHERE session=? AND status IN ('failed','needs_speakers') ORDER BY offset LIMIT 20",
                         [selected]
                     )
                     .compactMap { $0["error"] }
+                if processingFailures != nextFailures { processingFailures = nextFailures }
             } else {
-                recordingDetails = ""
-                audioExpiry = nil
-                processingFailures = []
+                if !recordingDetails.isEmpty { recordingDetails = "" }
+                if audioExpiry != nil { audioExpiry = nil }
+                if !processingFailures.isEmpty { processingFailures = [] }
             }
             summaries.observe(selected: selected)
         } catch { self.error = error.localizedDescription }
@@ -301,12 +307,15 @@ import SwiftUI
                 if selected != active["id"] { selected = active["id"] }
                 let activeRecording = active["status"] == "recording"
                 if recording != activeRecording { recording = activeRecording }
-                elapsed = Int(
-                    Date().timeIntervalSince1970 - (Double(active["started"] ?? "0") ?? 0))
+                if activeRecording {
+                    elapsed = Int(
+                        Date().timeIntervalSince1970 - (Double(active["started"] ?? "0") ?? 0))
+                }
             }
             refresh()
-            processing =
+            let nextProcessing =
                 "Synthetic pipeline · \((try? store.exec("SELECT COUNT(*) AS n FROM chunks WHERE status='queued'").first?["n"]) ?? "0") queued"
+            if processing != nextProcessing { processing = nextProcessing }
             return
         }
         if Date().timeIntervalSince(lastMaintenance) >= 60 {

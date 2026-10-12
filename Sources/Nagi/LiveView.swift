@@ -4,11 +4,22 @@ import SwiftUI
 
 struct LiveView: View {
     @EnvironmentObject var j: Journal
-    @State private var paragraphs: [LiveParagraph] = []
+    var body: some View { LiveContentView(store: j.store) }
+}
+private struct LiveContentView: View {
+    @EnvironmentObject var j: Journal
+    @StateObject private var loader: LivePageLoader
+    init(store: Store) {
+        _loader = StateObject(
+            wrappedValue: LivePageLoader(read: {
+                try LiveDocument.page(store, session: $0, before: $1)
+            }))
+    }
+    private var paragraphs: [LiveParagraph] { loader.rows }
     @State private var following = true
     @State private var before = Double.greatestFiniteMagnitude
     @State private var visibleSession = ""
-    @State private var message = ""
+    private var message: String { loader.message }
     private var session: String { j.activeLiveSession ?? j.selected ?? "" }
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -113,6 +124,7 @@ struct LiveView: View {
         .onAppear {
             j.chooseLive(); reload()
         }
+        .onDisappear { loader.cancel() }
         .onChange(of: j.liveRevision) { _, _ in if following { reload() } }
         .onChange(of: session) { _, _ in
             following = true; before = .greatestFiniteMagnitude; reload()
@@ -127,15 +139,9 @@ struct LiveView: View {
         return Text(j.liveCommitted) + Text(j.liveTentative).foregroundColor(.secondary)
     }
     private func reload() {
-        guard !session.isEmpty else { paragraphs = []; return }
+        guard !session.isEmpty else { loader.clear(); return }
         if visibleSession != session { visibleSession = session; before = .greatestFiniteMagnitude }
-        do {
-            let next = try LiveDocument.page(j.store, session: session, before: before)
-            if paragraphs != next { paragraphs = next }
-            message = ""
-        } catch {
-            message = "Saved audio is safe. Could not refresh text: \(error.localizedDescription)"
-        }
+        loader.load(session: session, before: before)
     }
     private func time(_ seconds: Double) -> String {
         String(format: "%02d:%02d", Int(seconds) / 60, Int(seconds) % 60)
