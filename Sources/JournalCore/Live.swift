@@ -76,6 +76,7 @@ public final class LiveTranscriber: @unchecked Sendable {
     private let session: String
     private let project: URL
     private let responsiveness: LiveResponsiveness
+    private var registeredWorker: UUID?
     public var workerPID: Int32 { process.isRunning ? process.processIdentifier : 0 }
     private enum Event { case audio(AVAudioPCMBuffer, Double), endSpan }
     private var preRoll: [Event] = []
@@ -135,7 +136,10 @@ public final class LiveTranscriber: @unchecked Sendable {
                 }
                 process.terminationHandler = { [weak self] p in
                     guard let self else { return }
-                    self.lock.lock(); let intentional = self.stopped; self.lock.unlock()
+                    self.lock.lock(); let worker = self.registeredWorker;
+                    self.registeredWorker = nil
+                    let intentional = self.stopped; self.lock.unlock()
+                    WorkerRegistry.shared.end(worker)
                     if !intentional || p.terminationStatus != 0 {
                         self.fail(
                             "Live worker exited; archival recording continues. Saved audio will be transcribed in chunks."
@@ -143,6 +147,13 @@ public final class LiveTranscriber: @unchecked Sendable {
                     }
                 }
                 try process.run()
+                lock.lock()
+                registeredWorker = WorkerRegistry.shared.start(
+                    pid: process.processIdentifier, role: .transcription)
+                if !process.isRunning {
+                    WorkerRegistry.shared.end(registeredWorker); registeredWorker = nil
+                }
+                lock.unlock()
                 try? output.fileHandleForWriting.close()
                 try? input.fileHandleForReading.close()
                 let timer = DispatchSource.makeTimerSource(
@@ -330,6 +341,8 @@ public final class LiveTranscriber: @unchecked Sendable {
             try? input.fileHandleForWriting.close()
             try? output.fileHandleForWriting.close()
             if process.isRunning { process.waitUntilExit() }
+            lock.lock(); let worker = registeredWorker; registeredWorker = nil; lock.unlock()
+            WorkerRegistry.shared.end(worker)
             output.fileHandleForReading.readabilityHandler = nil
             // Drain final NDJSON before releasing the model lease to batch ML.
             readerLock.lock()

@@ -228,7 +228,9 @@ public final class Processor: @unchecked Sendable {
         }
         let modelURL = project.appendingPathComponent("Models/" + model.filename)
         guard FileManager.default.fileExists(atPath: modelURL.path) else {
-            throw JournalError("Install \(model.name) in Models, then Retry")
+            throw JournalError(
+                "\(model.name) is missing from the running app’s Runtime/Models (\(model.filename)). Check Settings → Models; add the model to the repository Models folder, rebuild/reinstall the app, then Retry. Adding it to another app copy does not repair this running copy."
+            )
         }
         let isEnrollment = store.setting("enrollment-session") == chunk.session
         var asr: ASRRow? = nil
@@ -244,7 +246,7 @@ public final class Processor: @unchecked Sendable {
                 }, error: nil)
         }
         if !isEnrollment && asr == nil {
-            onStatus?("Transcribing · \(model.name)")
+            onStatus?("Loading model · \(model.name)")
             let executable = project.appendingPathComponent("bin/ASRWorker")
             let resultURL = store.root.appendingPathComponent("derived/\(chunk.id).asr.json")
             defer { try? FileManager.default.removeItem(at: resultURL) }
@@ -265,7 +267,14 @@ public final class Processor: @unchecked Sendable {
                     "-p", "(version 1)(allow default)(deny network*)", executable.path,
                     modelURL.path,
                     input.path, resultURL.path,
-                ], log: log, timeout: min(180, remaining), environment: workerEnvironment)
+                ], log: log, timeout: min(180, remaining), environment: workerEnvironment,
+                onStage: { [weak self] stage in
+                    let title =
+                        stage == "model_loading"
+                        ? "Loading model"
+                        : stage == "aligning" ? "Aligning final timestamps" : "Transcribing"
+                    self?.onStatus?(title + " · " + model.name)
+                }, workerRole: .transcription)
             let raw = try JSONDecoder().decode(ASRRow.self, from: Data(contentsOf: resultURL))
             if let error = raw.error { throw JournalError("ASR: " + error) }
             asr = ASRRow(
@@ -294,7 +303,8 @@ public final class Processor: @unchecked Sendable {
                 [
                     "-p", "(version 1)(allow default)(deny network*)", speakerWorker.path, wav.path,
                     diarized.path, models.path,
-                ], log: log, timeout: min(180, remaining), environment: workerEnvironment)
+                ], log: log, timeout: min(180, remaining), environment: workerEnvironment,
+                workerRole: .speakers)
             speakers = try JSONDecoder()
                 .decode(SpeakerResult.self, from: Data(contentsOf: diarized))
             try store.exec(

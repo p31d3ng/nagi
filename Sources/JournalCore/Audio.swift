@@ -53,7 +53,8 @@ public enum LocalProcess {
     /// No shell interpolation. Disk logs avoid pipe deadlocks and bounded output memory.
     @discardableResult public static func run(
         _ executable: String, _ args: [String], log: URL? = nil, timeout: Double = 180,
-        environment: [String: String] = [:]
+        environment: [String: String] = [:], onStage: ((String) -> Void)? = nil,
+        workerRole: WorkerRole? = nil
     ) throws -> Int32 {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: executable)
@@ -76,8 +77,23 @@ public enum LocalProcess {
         p.standardOutput = handle
         p.standardError = handle
         try p.run()
+        let workerID = workerRole.map {
+            WorkerRegistry.shared.start(pid: p.processIdentifier, role: $0)
+        }
+        defer { WorkerRegistry.shared.end(workerID) }
         let deadline = Date().addingTimeInterval(timeout)
-        while p.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+        var lastStage: String?, nextPoll = Date.distantPast
+        func pollStage() {
+            guard let onStage else { return }
+            if let stage = WorkerStage.last(in: logTail(logURL)), stage != lastStage {
+                lastStage = stage; onStage(stage)
+            }
+        }
+        while p.isRunning && Date() < deadline {
+            if Date() >= nextPoll { pollStage(); nextPoll = Date().addingTimeInterval(0.25) }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        pollStage()
         if p.isRunning {
             p.terminate()
             Thread.sleep(forTimeInterval: 0.2)

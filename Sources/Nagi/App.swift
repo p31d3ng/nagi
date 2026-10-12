@@ -17,11 +17,6 @@ import SwiftUI
     @Published var position = 0.0
     @Published var session: String?
 }
-@MainActor final class CaptureMeter: ObservableObject {
-    @Published var level = 0.0
-    @Published var elapsed = 0
-    @Published var systemLevel = 0.0
-}
 @MainActor final class Journal: ObservableObject {
     let meter = CaptureMeter()
     let microphonePermission = MicrophonePermission()
@@ -37,6 +32,9 @@ import SwiftUI
     @Published var recordingDetails = ""
     @Published var audioExpiry: Double?
     @Published var processingFailures: [String] = []
+    @Published var transcriptStatus = ""
+    @Published var queueSummary = ""
+    private var processingPhaseBegan: Date?
     @Published var sessions: [Session] = []
     @Published var selected: String?
     @Published var activeLiveSession: String?
@@ -100,6 +98,9 @@ import SwiftUI
         ProcessInfo.processInfo.environment["NAGI_SYNTHETIC_MONITOR"] == "1"
         || Bundle.main.object(forInfoDictionaryKey: "NagiSyntheticTest") as? Bool == true
     private var meterTimer: Timer?
+    private var diagnosticRuntime: Bool {
+        syntheticMonitor && ProcessInfo.processInfo.environment["NAGI_DIAGNOSTIC_DRAIN"] == "1"
+    }
     private let capture = Capture()
     private var writer: ChunkWriter?
     private var timer: Timer?
@@ -196,6 +197,8 @@ import SwiftUI
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.processing = status
+                self.processingPhaseBegan = status.hasPrefix("Idle") ? nil : Date()
+                self.meter.processingElapsed = 0
                 if status.hasPrefix("Idle"), !self.recording, !self.playing,
                     self.status.hasPrefix("Imported")
                 {
@@ -255,19 +258,36 @@ import SwiftUI
         }
         if syntheticMonitor {
             status = "Synthetic test monitor · no microphone"
-            meterTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) {
-                [weak self] _ in
-                Task { @MainActor in
-                    guard let self, self.recording else { return }
-                    self.level = 0.2 + 0.05 * sin(Date().timeIntervalSince1970)
+            if ProcessInfo.processInfo.environment["NAGI_LEVEL_TEST"] == "1" {
+                meter.begin(session: "synthetic-meter", systemEnabled: true)
+                meterTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) {
+                    [weak self] _ in
+                    Task { @MainActor in
+                        guard let self else { return }
+                        let t = ProcessInfo.processInfo.systemUptime
+                        self.meter.mailbox.offer(
+                            0.05 + 0.03 * sin(t * 2), system: false, session: "synthetic-meter",
+                            at: t)
+                        self.meter.mailbox.offer(
+                            0.02 + 0.01 * sin(t), system: true, session: "synthetic-meter", at: t)
+                    }
                 }
             }
         } else {
             processor.schedule()
         }
+        if diagnosticRuntime {
+            activeLiveSession = selected ?? sessions.first?.id
+            processor.schedule()
+        }
     }
     func refresh() {
         do {
+            let globalJobs = try store.exec(
+                "SELECT status,COUNT(*) AS n,COALESCE(SUM(duration),0) AS seconds FROM chunks WHERE status IN ('queued','processing','failed','needs_speakers') GROUP BY status"
+            )
+            let summary = TranscriptionProgress.queue(globalJobs)
+            if queueSummary != summary { queueSummary = summary }
             let nextSessions = try store.sessions()
             let nextSegments = try store.segments(
                 session: query.isEmpty ? selected : nil, query: query, speaker: speakerFilter,
@@ -355,6 +375,24 @@ import SwiftUI
                     .first?["first"]
                     .flatMap(Double.init).map { $0 + 172800 }
                 if audioExpiry != nextExpiry { audioExpiry = nextExpiry }
+                let jobRows = try store.exec(
+                    "SELECT status,COUNT(*) AS n FROM chunks WHERE session=? GROUP BY status",
+                    [selected])
+                let jobs = Dictionary(
+                    uniqueKeysWithValues: jobRows.map {
+                        ($0["status"] ?? "unknown", Int($0["n"] ?? "0") ?? 0)
+                    })
+                let count =
+                    Int(
+                        try store
+                            .exec("SELECT COUNT(*) AS n FROM segments WHERE session=?", [selected])
+                            .first?["n"] ?? "0") ?? 0
+                let selectedModel = sessions.first(where: { $0.id == selected })?.model ?? model
+                let progress = TranscriptionProgress.describe(
+                    model: selectedModel, recording: sessionID == selected && recording,
+                    speechOnly: store.setting("saving-" + selected) == "speechOnly", statuses: jobs,
+                    transcripts: count)
+                if transcriptStatus != progress { transcriptStatus = progress }
                 let nextFailures =
                     try store.exec(
                         "SELECT error FROM chunks WHERE session=? AND status IN ('failed','needs_speakers') ORDER BY offset LIMIT 20",
@@ -371,7 +409,11 @@ import SwiftUI
         } catch { self.error = error.localizedDescription }
     }
     func tick() {
-        if syntheticMonitor {
+        if let began = processingPhaseBegan {
+            let seconds = Int(Date().timeIntervalSince(began));
+            if meter.processingElapsed != seconds { meter.processingElapsed = seconds }
+        }
+        if syntheticMonitor && !diagnosticRuntime {
             let active =
                 try? store.exec(
                     "SELECT id,started,status FROM sessions ORDER BY started DESC LIMIT 1"
@@ -403,7 +445,8 @@ import SwiftUI
                         "SELECT COUNT(*) AS n FROM chunks WHERE session=? AND status='queued'", [id]
                     )
                     .first?["n"]) ?? "0"
-            processing = "Live preview · \(queued) chunks await final alignment and speakers"
+            let next = "Live preview · \(queued) chunks await final alignment and speakers"
+            if processing != next { processing = next }
         }
         if !recording, liveTranscriber == nil, let id = activeLiveSession {
             let pending =
@@ -413,10 +456,11 @@ import SwiftUI
                         [id]
                     )
                     .first?["n"]) ?? "0"
-            liveStatus =
+            let nextLiveStatus =
                 pending == "0"
                 ? "Saved transcript · final processing complete"
                 : "Recording saved · \(pending) chunks need final processing; see Timeline for failures"
+            if liveStatus != nextLiveStatus { liveStatus = nextLiveStatus }
         }
         let current = Devices.inputs()
         let ids = Set(current.map(\.id))
@@ -505,11 +549,13 @@ import SwiftUI
         ensureLive()
     }
     private func ensureLive() {
-        guard systemCapture == nil else { return }
+        guard systemCapture == nil else {
+            liveStatus = TranscriptionProgress.liveHint(model: model, dual: true); return
+        }
         guard recording, !enrollment, let id = sessionID, liveTranscriber == nil else { return }
         guard model == "unified" else {
             liveStatus =
-                "Multilingual model · completed chunk updates; incremental preview is English only."
+                TranscriptionProgress.liveHint(model: model, dual: false)
             return
         }
         startLive(for: id)
@@ -631,6 +677,7 @@ import SwiftUI
         stopPlayback()
         let dual = includeSystemAudio && !enroll
         let requestedSavingMode = savingMode
+        liveStatus = TranscriptionProgress.liveHint(model: model, dual: dual)
         let stream = dual ? SystemAudioCapture() : nil
         status = dual ? "Preparing microphone + system audio…" : "Preparing microphone…"
         do {
@@ -655,6 +702,8 @@ import SwiftUI
                 at: started.timeIntervalSince1970)
             sessionID = id
             captureRun.bind(run, session: id, source: stream)
+            meter.begin(session: id, systemEnabled: dual)
+            let levels = meter.mailbox
             try store.set(
                 "metadata-" + id,
                 "engine=5d66f602;model=\(Models.all.first{$0.id==model}!.revision);threads=2;backend=metal;capture=original-rate CAF + gzip;vad=RMS 0.0001;language=script estimate;preferred=\(preferredWords);rules=\(store.setting("rules"));diarization=Community1/fc8c3e4 nonexclusive + precluster overlap; unified=streaming canonical / approximate offline times / 0.75s context / midpoint ownership; chunk=10s exact"
@@ -681,11 +730,7 @@ import SwiftUI
                     }
                 }
                 system.onChunk = { [weak self] in self?.processor.schedule() }
-                system.onLevel = { [weak self] level in
-                    DispatchQueue.main.async {
-                        if let self, self.sessionID == id { self.systemLevel = min(1, level * 8) }
-                    }
-                }
+                system.onLevel = { level in levels.offer(level, system: true, session: id) }
                 system.onError = { [weak self, weak stream] message in
                     DispatchQueue.main.async {
                         guard let self, let stream, self.sessionID == id,
@@ -726,9 +771,7 @@ import SwiftUI
                         : "Listening · non-speech stays in memory only · " + device.name
                 }
             }
-            writer.onLevel = { [weak self] level in
-                DispatchQueue.main.async { self?.level = min(1, level * 8) }
-            }
+            writer.onLevel = { level in levels.offer(level, system: false, session: id) }
             writer.onError = { [weak self] error in
                 DispatchQueue.main.async {
                     guard let self, self.sessionID == id,
@@ -789,6 +832,7 @@ import SwiftUI
         } catch {
             var outcome = captureRun.outcome(run, error: error)
             captureRun.end(run)
+            meter.stop()
             stream?.close()
             do { try capture.stop() } catch { outcome = outcome.preservingFailure(error) }
             do { try writer?.finish() } catch { outcome = outcome.preservingFailure(error) }
@@ -831,6 +875,7 @@ import SwiftUI
             if captureBusy {
                 startTask?.cancel()
                 systemCapture?.close()
+                meter.stop()
                 status =
                     captureRun.hasFailure
                     ? "Capture startup failed · finalizing accepted audio…"
@@ -839,6 +884,7 @@ import SwiftUI
             return
         }
         captureRun.end()
+        meter.stop()
         let stream = systemCapture
         stream?.close()
         let system = systemWriter

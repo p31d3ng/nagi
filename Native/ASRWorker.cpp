@@ -38,6 +38,7 @@ int main(int argc, char **argv) {
         std::cerr << "Input exceeds bounded 12 second job";
         return 2;
     }
+    std::cerr << "NAGI_STAGE model_loading\n";
     transcribe_model_load_params load;
     transcribe_model_load_params_init(&load);
     load.backend = TRANSCRIBE_BACKEND_METAL;
@@ -57,6 +58,7 @@ int main(int argc, char **argv) {
         transcribe_model_free(model);
         return 3;
     }
+    std::cerr << "NAGI_STAGE transcribing\n";
     std::string streaming;
     if (std::string(argv[1]).find("parakeet-unified-en") != std::string::npos) {
         status = transcribe_stream_begin(session, nullptr, nullptr);
@@ -81,6 +83,7 @@ int main(int argc, char **argv) {
     }
     // Current engine streaming path omits word timing. A sequential offline pass
     // supplies aligned word rows. Both uncorrected outputs are kept by the store.
+    if (!streaming.empty()) std::cerr << "NAGI_STAGE aligning\n";
     transcribe_run_params rp;
     transcribe_run_params_init(&rp);
     status = transcribe_run(session, pcm.data(), int(pcm.size()), &rp);

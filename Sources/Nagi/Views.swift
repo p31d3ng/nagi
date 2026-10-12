@@ -8,7 +8,7 @@ struct ContentView: View {
     @State private var settingsPage = "Permissions"
     private let settingsPages = [
         "Permissions", "Summarization", "Devices", "Models", "Storage", "Voice profile",
-        "Dictionary",
+        "Dictionary", "Performance",
     ]
     @State private var editing: Segment?
     @State private var deleteCandidate: Session?
@@ -153,6 +153,7 @@ struct ContentView: View {
         case "Live": return "text.bubble"
         case "Devices": return "mic"
         case "Models": return "cpu"
+        case "Performance": return "gauge.with.dots.needle.50percent"
         case "Voice profile": return "person.crop.circle"
         case "Dictionary": return "text.book.closed"
         case "Storage": return "internaldrive"
@@ -328,6 +329,9 @@ struct ContentView: View {
                                 )
                                 .font(.caption).foregroundStyle(.secondary)
                             }
+                            if !j.transcriptStatus.isEmpty {
+                                Text(j.transcriptStatus).font(.callout).foregroundStyle(.secondary)
+                            }
                             if !j.processingFailures.isEmpty {
                                 Button("Retry failed processing", systemImage: "arrow.clockwise") {
                                     do { try j.processor.retry() } catch {
@@ -356,7 +360,7 @@ struct ContentView: View {
                                             ? "Choose your receiver in Settings → Devices, then start recording. You can also import a local audio file."
                                             : j.selected == nil
                                                 ? "Select a recent conversation to review its transcript and playback."
-                                                : "Audio chunks are durable. Processing status and recovery options appear above; silence has no transcript."
+                                                : "Check processing status above. Whisper produces finalized chunk text, not an incremental live preview. No saved speech, missing bundled models or worker errors can also leave this view empty."
                                 ))
                         }
                         ForEach(j.segments) { segment in
@@ -536,7 +540,7 @@ struct ContentView: View {
                 .font(.callout).foregroundStyle(.secondary)
             case "Models":
                 Text(
-                    "Choose manually before each session. Models and audio remain on this Mac. ASR and speaker analysis run sequentially."
+                    "Choose manually before each session. Models and audio remain on this Mac. Whisper produces finalized chunk text, not incremental live preview. ASR and speaker analysis run sequentially. Installed apps use their bundled Runtime/Models; rebuild/reinstall after adding models to the repository."
                 )
                 .foregroundStyle(.secondary)
                 Picker("Speech-to-text model", selection: $j.model) {
@@ -607,6 +611,8 @@ struct ContentView: View {
                     "Rules apply after ASR to future jobs. They are case-sensitive and may replace substrings. Raw text and previous corrections are retained; use Undo or edit in the timeline."
                 )
                 .font(.callout).foregroundStyle(.secondary)
+            case "Performance":
+                PerformanceView(j: j)
             case "Storage":
                 Picker("Saving for new recordings", selection: $j.savingMode) {
                     Text("Speech only · default").tag(AudioSavingMode.speechOnly.rawValue)
@@ -690,7 +696,7 @@ struct EditTranscript: View {
 
 struct CaptureStatusBar: View {
     @ObservedObject var j: Journal
-    @ObservedObject var meter: CaptureMeter
+    let meter: CaptureMeter
     let accent: Color
     var body: some View {
         ViewThatFits(in: .horizontal) {
@@ -707,38 +713,47 @@ struct CaptureStatusBar: View {
     }
     private var statusInfo: some View {
         HStack(spacing: 16) {
-            if j.recording && j.includeSystemAudio && !j.enrollment {
-                VStack {
-                    Text(j.systemSavingSpeech ? "System · saving" : "System · listening")
-                        .font(.caption)
-                    ProgressView(value: j.systemLevel).frame(width: 60)
-                }
-                .accessibilityLabel("System audio level")
-            }
             Circle().fill(j.recording ? .red : j.captureStarting ? .orange : accent)
                 .frame(width: 12, height: 12)
             VStack(alignment: .leading, spacing: 5) {
                 Text(j.status).font(.headline)
-                Text(j.processing).font(.caption).foregroundStyle(.secondary)
-            }
-            if j.recording && meter.level < 0.0008 && meter.elapsed > 8 {
-                Text("Input is quiet · check TX / receiver").font(.caption).foregroundStyle(.orange)
+                ProcessingClockText(processing: j.processing, clock: meter.clock)
+                if !j.queueSummary.isEmpty {
+                    Text(j.queueSummary).font(.caption).foregroundStyle(.secondary)
+                }
             }
             if j.recording {
-                Text(String(format: "%02d:%02d", meter.elapsed / 60, meter.elapsed % 60))
-                    .monospacedDigit()
-                ProgressView(value: meter.level).frame(width: 90)
-                    .accessibilityLabel("Microphone input level")
+                CaptureElapsedText(clock: meter.clock)
             }
         }
     }
     private var captureControls: some View {
         ViewThatFits(in: .horizontal) {
             HStack(alignment: .top, spacing: 12) {
-                inputPicker; recordingButton
+                inputPicker; inputLevels; recordingButton
             }
             VStack(alignment: .leading, spacing: 10) {
-                inputPicker; recordingButton
+                inputPicker; inputLevels; recordingButton
+            }
+        }
+    }
+    private var inputLevels: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            InputLevelBar(title: "Mic", meter: meter).frame(width: 210, height: 32)
+            if j.recording {
+                Text(j.savingSpeech ? "Saving speech/audio" : "Listening · speech not being saved")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            if j.includeSystemAudio && !j.enrollment {
+                InputLevelBar(title: "System", meter: meter, system: true)
+                    .frame(width: 210, height: 32)
+                if j.recording {
+                    Text(
+                        j.systemSavingSpeech
+                            ? "Saving speech/audio" : "Listening · speech not being saved"
+                    )
+                    .font(.caption2).foregroundStyle(.secondary)
+                }
             }
         }
     }
@@ -796,5 +811,23 @@ private struct PlaybackHighlight: ViewModifier {
             meter.session == session && meter.position >= start && meter.position < end
                 ? color.opacity(0.13) : Color(nsColor: .textBackgroundColor),
             in: RoundedRectangle(cornerRadius: 14))
+    }
+}
+
+private struct ProcessingClockText: View {
+    let processing: String
+    @ObservedObject var clock: CaptureClock
+    var body: some View {
+        Text(
+            processing
+                + (processing.hasPrefix("Idle") ? "" : " · \(clock.processingElapsed)s elapsed")
+        )
+        .font(.caption).foregroundStyle(.secondary)
+    }
+}
+private struct CaptureElapsedText: View {
+    @ObservedObject var clock: CaptureClock
+    var body: some View {
+        Text(String(format: "%02d:%02d", clock.elapsed / 60, clock.elapsed % 60)).monospacedDigit()
     }
 }

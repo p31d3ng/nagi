@@ -34,6 +34,9 @@ private struct LiveContentView: View {
                 .disabled(paragraphs.isEmpty)
             }
             Text(j.liveStatus).foregroundStyle(.secondary)
+            if !j.transcriptStatus.isEmpty {
+                Text(j.transcriptStatus).font(.callout).foregroundStyle(.secondary)
+            }
             HStack {
                 Picker("Preview responsiveness", selection: $j.liveMode) {
                     Text("Balanced · quicker").tag("balanced")

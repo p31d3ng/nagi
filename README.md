@@ -2,6 +2,8 @@
 
 A native SwiftUI voice journal for macOS. Nagi (凪) means calm or a lull in the wind. Capture, audio, models, transcription, speaker analysis and search stay on the Mac. Nagi 0.4.0 adds optional transcript-only summarization: configure an HTTPS service and app bearer in Settings, then submit a saved conversation manually or opt in for new recordings. Automatic sharing is off by default. Audio and voice profiles never upload; no telemetry is implemented.
 
+Nagi 0.7.0 adds independent received-audio meters beside recording controls, clearer finalized-chunk/queue/error indicators, and Settings → Performance with native process CPU/RSS readings. See [indicator and performance validation](INDICATORS_PERFORMANCE.md). The Mini-specific post-stop CPU report remains unresolved; Studio results are not a claim of fixing that machine.
+
 ## Build and run
 
 Requirements: Apple Silicon Mac, macOS 15+, Xcode with Swift 6.2+, CMake, Python 3. The verified machine is an M1 Ultra Mac Studio with 128 GB RAM, macOS 26.6.2, Swift 6.3.3. Dependencies are pinned in `DEPENDENCIES.json`. No developer account or signing identity is needed for the local ad-hoc build.
