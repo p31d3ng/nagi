@@ -74,6 +74,7 @@ import SwiftUI
     @Published var playbackSources: [AudioOrigin] = [.legacy]
     @Published var sourceNotices: [String] = []
     private var startTask: Task<Void, Never>?
+    private let captureRun = CaptureRunState()
     private var systemCapture: SystemAudioCapture?
     private var systemWriter: ChunkWriter?
     @Published var error: String?
@@ -611,6 +612,7 @@ import SwiftUI
     private func begin(device: InputDevice, enroll: Bool) async {
         guard !captureBusy, !recording else { return }
         captureBusy = true; captureStarting = true
+        let run = captureRun.begin()
         defer { captureBusy = false; captureStarting = false; startTask = nil }
         stopPlayback()
         let dual = includeSystemAudio && !enroll
@@ -636,6 +638,7 @@ import SwiftUI
                 device: device.name + " | " + device.id, model: model,
                 at: started.timeIntervalSince1970)
             sessionID = id
+            captureRun.bind(run, session: id, source: stream)
             try store.set(
                 "metadata-" + id,
                 "engine=5d66f602;model=\(Models.all.first{$0.id==model}!.revision);threads=2;backend=metal;capture=original-rate CAF + gzip;vad=RMS 0.0001;language=script estimate;preferred=\(preferredWords);rules=\(store.setting("rules"));diarization=Community1/fc8c3e4 nonexclusive + precluster overlap; unified=streaming canonical / approximate offline times / 0.75s context / midpoint ownership; chunk=10s exact"
@@ -660,9 +663,14 @@ import SwiftUI
                         if let self, self.sessionID == id { self.systemLevel = min(1, level * 8) }
                     }
                 }
-                system.onError = { [weak self] message in
+                system.onError = { [weak self, weak stream] message in
                     DispatchQueue.main.async {
-                        self?.error = message; self?.stop(note: "System source gap: " + message)
+                        guard let self, let stream, self.sessionID == id,
+                            self.systemCapture === stream,
+                            self.captureRun.fail(run, session: id, source: stream, message: message)
+                        else { return }
+                        self.error = message
+                        self.stop(note: "System source gap: " + message)
                     }
                 }
                 stream.onError = system.onError
@@ -698,7 +706,9 @@ import SwiftUI
             }
             writer.onError = { [weak self] error in
                 DispatchQueue.main.async {
-                    guard let self, self.sessionID == id else { return }
+                    guard let self, self.sessionID == id,
+                        self.captureRun.fail(run, session: id, message: error)
+                    else { return }
                     self.stop(note: "Capture gap: " + error)
                     self.error = error
                 }
@@ -749,20 +759,23 @@ import SwiftUI
             }
             refresh()
         } catch {
+            var outcome = captureRun.outcome(run, error: error)
+            captureRun.end(run)
             stream?.close()
-            try? capture.stop()
-            try? writer?.finish()
-            try? systemWriter?.finish()
+            do { try capture.stop() } catch { outcome = outcome.preservingFailure(error) }
+            do { try writer?.finish() } catch { outcome = outcome.preservingFailure(error) }
+            do { try systemWriter?.finish() } catch { outcome = outcome.preservingFailure(error) }
+            let sourceStatus = outcome == .cancelled ? "cancelled" : "failed"
             if let id = sessionID {
                 try? store.finish(
-                    id, note: "Capture startup failed/cancelled: " + error.localizedDescription)
+                    id, note: outcome.message)
                 try? AudioSources.status(
-                    store, session: id, origin: .microphone, status: "failed",
-                    detail: error.localizedDescription)
+                    store, session: id, origin: .microphone, status: sourceStatus,
+                    detail: outcome.message)
                 if dual {
                     try? AudioSources.status(
-                        store, session: id, origin: .system, status: "failed",
-                        detail: error.localizedDescription)
+                        store, session: id, origin: .system, status: sourceStatus,
+                        detail: outcome.message)
                 }
             }
             await stream?.stop()
@@ -773,11 +786,13 @@ import SwiftUI
             writer = nil
             sessionID = nil
             recording = false
-            if error is CancellationError {
+            switch outcome {
+            case .cancelled:
                 self.error = nil
-                status = "Startup cancelled · any accepted audio was saved"
-            } else {
-                self.error = error.localizedDescription
+                status = outcome.message
+            case .failed(let message):
+                self.error = message
+                status = "Capture startup failed · " + message
             }
             enrollment = false
         }
@@ -788,10 +803,14 @@ import SwiftUI
             if captureBusy {
                 startTask?.cancel()
                 systemCapture?.close()
-                status = "Cancelling capture startup…"
+                status =
+                    captureRun.hasFailure
+                    ? "Capture startup failed · finalizing accepted audio…"
+                    : "Cancelling capture startup…"
             }
             return
         }
+        captureRun.end()
         let stream = systemCapture
         stream?.close()
         let system = systemWriter

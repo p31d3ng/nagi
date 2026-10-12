@@ -206,7 +206,14 @@ final class AudioSourcesTests: XCTestCase {
         XCTAssertEqual(snap.input.segments[0].speakerId, snap.input.segments[1].speakerId)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: snap.body) as? [String: Any])
         let turns = try XCTUnwrap(json["segments"] as? [[String: Any]])
+        XCTAssertEqual(
+            Set(turns[0].keys),
+            Set([
+                "id", "start", "end", "speakerId", "speakerLabel", "language", "text", "uncertain",
+                "overlap", "attribution",
+            ]))
         XCTAssertNil(turns[0]["audioOrigin"])
+        XCTAssertNil(turns[0]["echo"])
         XCTAssertTrue(
             snap.input.segments.allSatisfy { $0.id.hasPrefix("s") && $0.text == "Boundary" })
     }

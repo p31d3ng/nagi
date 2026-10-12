@@ -200,4 +200,28 @@ private actor FakeSummaryTransport: SummaryTransport {
         XCTAssertTrue(c.lastMessage.contains("Nothing was sent"))
     }
 
+    func testDualSourcesDoNotArmOrSendWhenAutomaticIsOff() async throws {
+        let id = try fixture()
+        let first = try XCTUnwrap(try store.chunks(session: id).first)
+        try store.exec("UPDATE chunk_sources SET origin='microphone' WHERE chunk=?", [first.id])
+        let sys = try store.registerChunk(
+            session: id, path: "", captured: Date().timeIntervalSince1970, offset: 0,
+            model: "unified", origin: .system)
+        try store.exec("UPDATE chunks SET status='done' WHERE id=?", [sys])
+        try store.insertSegment(
+            session: id, offset: 0, end: 1, raw: "Synthetic remote voice",
+            corrected: "Synthetic remote voice", speaker: "Speaker 2", language: "en", chunk: sys)
+        let transport = FakeSummaryTransport()
+        let controller = SummaryController(
+            store: store, networkAllowed: true, vault: vault, transport: transport)
+        XCTAssertFalse(controller.automatic)
+        controller.arm(session: id)
+        controller.observe(selected: id)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let calls = await transport.count()
+        XCTAssertEqual(calls, 0)
+        XCTAssertTrue(try store.exec("SELECT * FROM summary_auto WHERE session=?", [id]).isEmpty)
+        XCTAssertTrue(try store.exec("SELECT * FROM summaries WHERE session=?", [id]).isEmpty)
+    }
+
 }

@@ -29,7 +29,8 @@ startup. Sleep stops recording with an explicit gap; locking/closing a window do
 not deliberately stop it, but actual SCK screen-lock behavior remains untested.
 
 Dual-source conversations use continuous saving even when the single-microphone
-preference is Speech only; the preference itself is preserved. Quiet chunks may skip
+preference is Speech only; the preference itself is preserved. Dual-source recording
+does not use VAD to omit audio and provides no speech-only storage savings. Quiet chunks may skip
 ASR but recorded audio remains. The streaming microphone preview is suspended for
 dual-source capture so archival ASR and diarization remain sequential on the existing
 processing lane. Completed source-labelled spans appear in Live and Timeline.
@@ -66,12 +67,15 @@ voice profile are unchanged. No audio/profile upload, deployment or credentials 
 introduced. Existing optional summaries keep their opt-in settings and wire fields,
 IDs and speaker identities. Coalescing cannot cross origins; local evidence resolves
 origin from the existing segment ID. The backend is unchanged and receives no new
-source field; a future backend source-aware display needs an explicit contract change.
+source or echo-annotation fields. It cannot interpret these local hints or reliably
+recognize duplicated speech from them; both tracks' finalized text can reach the
+service under the existing explicit manual/automatic summary consent. A future
+backend source-aware display needs an explicit contract change.
 No real summary requests occurred in these tests.
 
 ## Verification and limits
 
-110 unit/integration tests passed, zero failures, in 25.820 seconds on macOS
+115 unit/integration tests passed, zero failures, in 26.605 seconds on macOS
 26.6.2 (25G83), Xcode 26.6 (17F113), including shared timestamp validation and interrupted startup refusing further
 admission/permission enumeration. Tests cover denied permission without content enumeration,
 SCK configuration/PCM copying, bounded oversize rejection, gaps/clock errors, late
@@ -88,7 +92,7 @@ file injection; it does not prove every simultaneous physical-capture crash case
 
 Two-source write stress injected 120.064 seconds per source (48 kHz microphone mono,
 system stereo), preserving all 5,763,072 frames per source across 26 chunks. Capture
-write wall time was 2.597 seconds and compression 1.874 seconds, combined RTF 0.037
+write wall time was 2.544 seconds and compression 1.884 seconds, combined RTF 0.037
 against concurrent session duration. Each live writer admits at most 64 buffers of
 8,192 frames; SCK admits at most stereo, while the microphone retains device channels.
 Inputs above 32 channels are refused explicitly. This bounds queued microphone
@@ -149,3 +153,10 @@ Use `12` instead of `-1` for an abrupt synthetic capture crash, `recover DATA` f
 recovery, and `whisper` as the final argument for multilingual fixtures. Do not point
 this harness at the normal journal or private recordings. Detailed raw test/profile
 outputs and generated audio stay in ignored reports/, not in the public repository.
+
+Review fixes: queued system errors must match the current run, session and stream.
+Startup cancellation preserves the first real source failure and any otherwise
+unreported audio-flush failure. Genuine user cancellation is distinct in UI and
+source status. Regression tests exercise stale callbacks after a new run, wrong
+stream identity, failure provenance through cancellation/flush, and default-off
+dual-source automatic summaries using a fake transport with zero requests.

@@ -523,6 +523,10 @@ struct ContentView: View {
                     "Use headphones to reduce acoustic duplication. Nagi excludes its own digital playback; possible echo hints are reversible evidence, not echo cancellation. Both tracks and all transcript text remain intact. Dual-source sessions use chunk processing instead of the streaming microphone preview to keep ML sequential."
                 )
                 .font(.caption).foregroundStyle(.secondary)
+                Text(
+                    "Dual-source audio is saved continuously; speech-only storage savings do not apply. If transcript summaries are enabled, both tracks' text can be shared. Source and echo hints stay local, so review possible duplication yourself."
+                )
+                .font(.caption).foregroundStyle(.secondary)
                 Toggle("Prevent idle system sleep while recording", isOn: $j.keepAwake)
                     .disabled(
                         j.recording)
