@@ -261,14 +261,14 @@ struct ContentView: View {
                                 } label: {
                                     Image(systemName: "trash")
                                 }
-                                .disabled(j.recording)
+                                .disabled(j.recording || j.captureBusy)
                             }
                             Text(session.device).font(.caption).foregroundStyle(.secondary)
                                 .textSelection(
                                     .enabled)
                             ConversationSummaryView(controller: j.summaries, session: session.id) {
                                 source in
-                                j.playConversation(session: session.id, at: source.start)
+                                j.playSummarySource(session: session.id, source: source)
                             }
                             Text(j.savingSummary).font(.caption).foregroundStyle(.secondary)
                             DisclosureGroup("Recording details") {
@@ -285,7 +285,22 @@ struct ContentView: View {
                                     )
                                     .lineLimit(2)
                             }
+                            ForEach(j.sourceNotices, id: \.self) { notice in
+                                Text(notice).font(.caption).foregroundStyle(.secondary)
+                            }
                             Text(speakerSummary).font(.caption).foregroundStyle(accent)
+                            if j.playbackSources.count > 1 {
+                                Picker("Audio source for playback", selection: $j.playbackOrigin) {
+                                    ForEach(j.playbackSources, id: \.rawValue) {
+                                        Text($0.title).tag($0)
+                                    }
+                                }
+                                .onChange(of: j.playbackOrigin) { _, _ in j.stopPlayback() }
+                                Text(
+                                    "Sources stay separate. Playback never mixes them or crosses from one into another."
+                                )
+                                .font(.caption).foregroundStyle(.secondary)
+                            }
                             HStack {
                                 Button("Play conversation", systemImage: "play.circle.fill") {
                                     j.playConversation(session: session.id)
@@ -349,6 +364,8 @@ struct ContentView: View {
                                 HStack {
                                     Text(segment.speaker).font(.subheadline.weight(.semibold))
                                         .foregroundStyle(accent)
+                                    Text(segment.origin.title).font(.caption)
+                                        .foregroundStyle(.secondary)
                                     Text(segment.language).font(.caption)
                                         .foregroundStyle(.secondary)
                                     Spacer()
@@ -364,6 +381,24 @@ struct ContentView: View {
                                         Image(systemName: "pencil")
                                     }
                                     .buttonStyle(.plain)
+                                }
+                                if segment.possibleEcho {
+                                    HStack {
+                                        Label(
+                                            "Possible speaker-output echo · audio/text preserved",
+                                            systemImage: "waveform.path"
+                                        )
+                                        .font(.caption)
+                                        Button("Dismiss") {
+                                            j.dismissEcho(segment, dismissed: true)
+                                        }
+                                        .font(.caption)
+                                    }
+                                } else if segment.echoDismissed {
+                                    Button("Restore echo hint if dismissed") {
+                                        j.dismissEcho(segment, dismissed: false)
+                                    }
+                                    .font(.caption)
                                 }
                                 Text(segment.corrected).font(.system(size: 16)).lineSpacing(5)
                                     .textSelection(
@@ -454,7 +489,7 @@ struct ContentView: View {
                         Text("Selected input disconnected").tag(j.inputUID)
                     }
                 }
-                .disabled(j.recording)
+                .disabled(j.recording || j.captureBusy)
                 Text(j.inputUID.isEmpty ? "No input selected" : j.inputUID)
                     .font(.caption.monospaced())
                     .textSelection(.enabled)
@@ -463,6 +498,31 @@ struct ContentView: View {
                     systemImage: "antenna.radiowaves.left.and.right"
                 )
                 .foregroundStyle(.secondary)
+                Divider()
+                Toggle("Include system audio for new conversations", isOn: $j.includeSystemAudio)
+                    .disabled(j.recording || j.captureBusy)
+                    .onChange(of: j.includeSystemAudio) { _, _ in j.saveSystemAudio() }
+                Text(
+                    "Off by default. Records computer playback alongside your selected microphone in separate continuous tracks. Voice enrollment uses the microphone only. Both sources must start successfully; no silent fallback."
+                )
+                .font(.callout).foregroundStyle(.secondary)
+                Label(
+                    j.systemAudioPermitted
+                        ? "System audio permission available"
+                        : "System audio permission unavailable", systemImage: "speaker.wave.2")
+                HStack {
+                    Button("Request system audio access…") { j.requestSystemAudioPermission() }
+                        .disabled(j.syntheticMonitor || j.recording || j.captureBusy)
+                    Button("Check system audio permission") { j.checkSystemAudioPermission() }
+                }
+                Text(
+                    "macOS may name this Screen & System Audio Recording in Privacy & Security and may require restarting Nagi after approval. This button requests access without starting capture. No screen images are stored."
+                )
+                .font(.caption).foregroundStyle(.secondary)
+                Text(
+                    "Use headphones to reduce acoustic duplication. Nagi excludes its own digital playback; possible echo hints are reversible evidence, not echo cancellation. Both tracks and all transcript text remain intact. Dual-source sessions use chunk processing instead of the streaming microphone preview to keep ML sequential."
+                )
+                .font(.caption).foregroundStyle(.secondary)
                 Toggle("Prevent idle system sleep while recording", isOn: $j.keepAwake)
                     .disabled(
                         j.recording)
@@ -478,7 +538,7 @@ struct ContentView: View {
                 Picker("Speech-to-text model", selection: $j.model) {
                     ForEach(Models.all) { Text($0.name).tag($0.id) }
                 }
-                .disabled(j.recording)
+                .disabled(j.recording || j.captureBusy)
                 ForEach(Models.all) { model in
                     VStack(alignment: .leading, spacing: 8) {
                         Text(model.name).font(.headline)
@@ -548,7 +608,7 @@ struct ContentView: View {
                     Text("Speech only · default").tag(AudioSavingMode.speechOnly.rawValue)
                     Text("Continuous audio").tag(AudioSavingMode.continuous.rawValue)
                 }
-                .disabled(j.recording)
+                .disabled(j.recording || j.captureBusy)
                 .onChange(of: j.savingMode) { _, _ in j.saveSavingMode() }
                 Text(
                     "Speech only uses a local speech detector with one second before/after speech. Long non-speech intervals are omitted; original elapsed timestamps remain. Noise can occasionally trigger saving, and faint/distant speech may be missed. Choose Continuous to preserve every sound. Existing audio is unchanged; guided enrollment and imports use continuous audio."
@@ -643,6 +703,10 @@ struct CaptureStatusBar: View {
     }
     private var statusInfo: some View {
         HStack(spacing: 16) {
+            if j.recording && j.includeSystemAudio && !j.enrollment {
+                ProgressView(value: j.systemLevel).frame(width: 60)
+                    .accessibilityLabel("System audio level")
+            }
             Circle().fill(j.recording ? .red : accent).frame(width: 12, height: 12)
             VStack(alignment: .leading, spacing: 5) {
                 Text(j.status).font(.headline)
@@ -654,7 +718,8 @@ struct CaptureStatusBar: View {
             if j.recording {
                 Text(String(format: "%02d:%02d", meter.elapsed / 60, meter.elapsed % 60))
                     .monospacedDigit()
-                ProgressView(value: meter.level).frame(width: 90).accessibilityLabel("Input level")
+                ProgressView(value: meter.level).frame(width: 90)
+                    .accessibilityLabel("Microphone input level")
             }
         }
     }
@@ -677,7 +742,7 @@ struct CaptureStatusBar: View {
                     Text("Selected input disconnected").tag(j.inputUID)
                 }
             }
-            .frame(width: 220).disabled(j.recording || j.syntheticMonitor)
+            .frame(width: 220).disabled(j.recording || j.captureBusy || j.syntheticMonitor)
             .accessibilityLabel("Recording input")
             Text(
                 j.recording
@@ -691,9 +756,15 @@ struct CaptureStatusBar: View {
     private var recordingButton: some View {
         Button(
             j.syntheticMonitor
-                ? "Test controls disabled" : j.recording ? "Stop & save" : "Start recording",
+                ? "Test controls disabled"
+                : j.recording
+                    ? "Stop & save"
+                    : j.captureBusy
+                        ? (j.captureStarting ? "Cancel startup" : "Finalizing…")
+                        : "Start recording",
             systemImage: j.recording ? "stop.fill" : "record.circle"
-        ) { j.recording ? j.stop() : j.start() }
+        ) { (j.recording || j.captureBusy) ? j.stop() : j.start() }
+        .disabled(j.captureBusy && !j.captureStarting)
         .buttonStyle(.borderedProminent).controlSize(.large).disabled(j.syntheticMonitor)
     }
 }

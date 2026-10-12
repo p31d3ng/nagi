@@ -10,6 +10,7 @@ import Foundation
     public var onChange: (() -> Void)?
     public var onMessage: ((String) -> Void)?
     public var onSkippedSilence: ((String) -> Void)?
+    public private(set) var origin: AudioOrigin = .legacy
     public var volume: Float = 1
     private let store: Store
     private let lane = DispatchQueue(
@@ -26,8 +27,8 @@ import Foundation
     private var reachedEnd = false
     private var waitingBoundary = false
     public init(store: Store) { self.store = store; super.init() }
-    public func start(session: String, at offset: Double = 0) {
-        stop(); self.session = session; position = max(0, offset)
+    public func start(session: String, at offset: Double = 0, origin: AudioOrigin = .legacy) {
+        stop(); self.session = session; self.origin = origin; position = max(0, offset)
         state = .preparing; onChange?()
         prepare(at: position, initial: true)
     }
@@ -62,21 +63,23 @@ import Foundation
         state = .playing; scheduleNext(); onChange?()
     }
     public func seek(to offset: Double) {
-        guard let session else { return }; start(session: session, at: offset)
+        guard let session else { return }; start(session: session, at: offset, origin: origin)
     }
     private func prepare(at offset: Double, initial: Bool) {
         guard let session else { return }
         let token = generation
         if !initial { loadingNext = true }
         let store = store
+        let origin = origin
         let excluded = initial ? "" : chunk?.id ?? ""
         lane.async { [weak self] in
             var url: URL?
             do {
                 let row =
                     try store.exec(
-                        "SELECT id FROM chunks WHERE session=? AND offset+duration>? AND id!=? ORDER BY offset LIMIT 1",
-                        [session, offset + 0.000001, excluded]
+                        "SELECT id FROM chunks WHERE session=? AND offset+duration>? AND id!=? AND "
+                            + AudioSources.sameOriginSQL + " ORDER BY offset LIMIT 1",
+                        [session, offset + 0.000001, excluded, origin.rawValue]
                     )
                     .first
                 guard let id = row?["id"], let item = try store.chunk(id) else {

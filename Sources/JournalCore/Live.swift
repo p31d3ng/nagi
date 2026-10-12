@@ -42,7 +42,7 @@ public enum LiveDocument {
             """
             SELECT * FROM (
                 SELECT 's-'||segments.id AS id,segments.offset,corrected AS text,
-                    speaker||' · '||language AS detail FROM segments WHERE session=?
+                    speaker||' · '||language||' · '||COALESCE((SELECT CASE origin WHEN 'microphone' THEN 'Microphone' WHEN 'system' THEN 'System audio' WHEN 'file' THEN 'Imported audio' ELSE 'Original audio' END FROM chunk_sources WHERE chunk=segments.chunk),'Original audio') AS detail FROM segments WHERE session=?
                     AND NOT EXISTS(SELECT 1 FROM live_previews p WHERE p.session=segments.session
                         AND segments.offset < p.offset+p.duration AND segments.end > p.offset)
                 UNION ALL

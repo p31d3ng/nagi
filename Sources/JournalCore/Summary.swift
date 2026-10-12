@@ -285,13 +285,14 @@ public enum SummaryStorage {
                 )
             }
             let rows = try store.exec(
-                "SELECT s.*,a.origin FROM segments s LEFT JOIN summary_attribution a ON a.segment=s.id WHERE s.session=? ORDER BY s.offset,s.id",
+                "SELECT s.*,a.origin,COALESCE((SELECT origin FROM chunk_sources WHERE chunk=s.chunk),'legacy') AS audio_origin FROM segments s LEFT JOIN summary_attribution a ON a.segment=s.id WHERE s.session=? ORDER BY s.offset,s.id",
                 [session])
             let overlap =
                 ((try store.exec("SELECT note FROM sessions WHERE id=?", [session]).first?["note"])
                 ?? "")
                 .contains("overlapping")
             var turns: [SummaryTurn] = []
+            var priorAudioOrigin = ""
             for row in rows {
                 let text = row["corrected"]!.trimmingCharacters(in: .whitespacesAndNewlines)
                 if text.isEmpty { continue }
@@ -305,7 +306,9 @@ public enum SummaryStorage {
                 }
                 let origin = row["origin"] ?? "unknown"
                 let uncertain = origin != "manual" || label.hasPrefix("Unknown")
-                if let last = turns.last, last.speakerLabel == label, last.language == language,
+                let audioOrigin = row["audio_origin"] ?? "legacy"
+                if audioOrigin == priorAudioOrigin, let last = turns.last,
+                    last.speakerLabel == label, last.language == language,
                     last.attribution == origin, last.uncertain == uncertain,
                     start >= last.end - 0.001, start - last.end <= 1,
                     last.text.count + text.count + 1 <= 4000
@@ -323,6 +326,7 @@ public enum SummaryStorage {
                             text: text, uncertain: uncertain, overlap: overlap, attribution: origin)
                     )
                 }
+                priorAudioOrigin = audioOrigin
             }
             guard !turns.isEmpty else {
                 throw JournalError("No finalized speech text to summarize.")

@@ -327,6 +327,10 @@ public final class ChunkWriter: @unchecked Sendable {
     public let store: Store
     public let session: String
     public let model: String
+    public let origin: AudioOrigin
+    public let hostAnchor: Double?
+    private var expectedEnd = 0.0
+    private var chunkClock = "frames"
     private var file: AVAudioFile?
     private var chunkID = ""
     private var frames: Int64 = 0
@@ -353,12 +357,16 @@ public final class ChunkWriter: @unchecked Sendable {
         admission.lock(); defer { admission.unlock() }; return capturedDuration
     }
     public init(
-        store: Store, session: String, model: String, started: Double = Date().timeIntervalSince1970
+        store: Store, session: String, model: String,
+        started: Double = Date().timeIntervalSince1970,
+        origin: AudioOrigin = .legacy, hostAnchor: Double? = nil
     ) {
         self.store = store
         self.session = session
         self.model = model
         self.started = started
+        self.origin = origin
+        self.hostAnchor = hostAnchor
     }
     public func enableSpeechOnly(vad: SpeechVAD) throws {
         try enableSpeechOnly(gate: SpeechGate(vad: vad))
@@ -385,10 +393,22 @@ public final class ChunkWriter: @unchecked Sendable {
         self.gate = gate
         try store.set("saving-" + session, AudioSavingMode.speechOnly.rawValue)
     }
-    @discardableResult public func enqueue(_ buffer: AVAudioPCMBuffer) -> Bool {
+    @discardableResult public func enqueue(
+        _ buffer: AVAudioPCMBuffer, at offset: Double? = nil, clock: String = "frames"
+    ) -> Bool {
         admission.lock()
         if stopped {
             admission.unlock()
+            return false
+        }
+        guard buffer.frameLength > 0, buffer.frameLength <= 8192, buffer.format.channelCount > 0,
+            buffer.format.channelCount <= 32
+        else {
+            stopped = true
+            admission.unlock()
+            onError?(
+                "Capture buffer size or channel count exceeds the supported limit. Recording stopped."
+            )
             return false
         }
         guard slots.wait(timeout: .now()) == .success else {
@@ -397,11 +417,11 @@ public final class ChunkWriter: @unchecked Sendable {
             onError?("Storage could not keep up; recording stopped with a gap.")
             return false
         }
-        admission.unlock()
         guard
             let copy = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameLength)
         else {
             slots.signal()
+            admission.unlock()
             return false
         }
         copy.frameLength = buffer.frameLength
@@ -414,7 +434,7 @@ public final class ChunkWriter: @unchecked Sendable {
         }
         queue.async {
             defer { self.slots.signal() }
-            do { try self.write(copy) } catch {
+            do { try self.write(copy, at: offset, clock: clock) } catch {
                 self.failed = true
                 self.admission.lock()
                 self.stopped = true
@@ -422,11 +442,31 @@ public final class ChunkWriter: @unchecked Sendable {
                 self.onError?(error.localizedDescription)
             }
         }
+        admission.unlock()
         return true
     }
-    public func write(_ buffer: AVAudioPCMBuffer) throws {
+    public func write(
+        _ buffer: AVAudioPCMBuffer, at offset: Double? = nil, clock: String = "frames"
+    ) throws {
         guard !failed else { return }
         let inputRate = buffer.format.sampleRate
+        guard inputRate > 0, inputRate <= 192000, buffer.frameLength > 0 else {
+            throw JournalError("Unsupported capture format or oversized buffer")
+        }
+        let position =
+            clock == "arrival"
+            ? max(offset ?? expectedEnd, expectedEnd) : offset ?? Double(total) / inputRate
+        guard position.isFinite, position >= 0, position >= expectedEnd - 0.02 else {
+            throw JournalError("Audio clock moved backwards; capture stopped honestly.")
+        }
+        if offset != nil, abs(position - expectedEnd) > 0.02 {
+            try closeChunk()
+            try AudioSources.gap(
+                store, session: session, origin: origin, start: expectedEnd, end: position,
+                reason: "capture_timestamp_gap")
+        }
+        if file != nil, chunkClock != clock { try closeChunk() }
+        chunkClock = clock
         if let data = buffer.floatChannelData {
             var peak = 0.0
             let channels = Int(buffer.format.channelCount)
@@ -445,10 +485,11 @@ public final class ChunkWriter: @unchecked Sendable {
         if let gate {
             try gate.feed(buffer)
         } else {
-            try writeSaved(buffer, at: Double(total) / inputRate)
+            try writeSaved(buffer, at: position)
         }
         total += Int64(buffer.frameLength)
-        admission.lock(); capturedDuration = Double(total) / inputRate; admission.unlock()
+        expectedEnd = position + Double(buffer.frameLength) / inputRate
+        admission.lock(); capturedDuration = expectedEnd; admission.unlock()
         if gate != nil, capturedDuration - lastProgress >= 1 {
             try store.exec(
                 "INSERT OR REPLACE INTO capture_progress VALUES(?,?,?)",
@@ -482,19 +523,20 @@ public final class ChunkWriter: @unchecked Sendable {
         if file == nil {
             rate = buffer.format.sampleRate
             try store.set(
-                "format-" + session,
+                "format-" + session + (origin == .system ? "-system" : ""),
                 "\(rate) Hz · \(buffer.format.channelCount) channels · original Float32 CAF / gzip")
             let path = "audio/\(UUID().uuidString).caf"
             chunkID = try store.registerChunk(
                 session: session, path: path,
                 captured: started + (imported ? 0 : offset),
-                offset: offset, model: model)
+                offset: offset, model: model, origin: origin, clock: chunkClock)
             file = try AVAudioFile(
                 forWriting: store.root.appendingPathComponent(path),
-                settings: buffer.format.settings)
+                settings: buffer.format.settings, commonFormat: buffer.format.commonFormat,
+                interleaved: buffer.format.isInterleaved)
             frames = 0
         }
-        guard buffer.format.sampleRate == rate else {
+        guard buffer.format == file!.processingFormat else {
             throw JournalError("Input format changed; finalize and start a new recording.")
         }
         try file!.write(from: buffer)
@@ -514,6 +556,7 @@ public final class ChunkWriter: @unchecked Sendable {
         onChunk?()
     }
     public func finish() throws {
+        admission.lock(); stopped = true; admission.unlock()
         var thrown: Error?
         queue.sync {
             do { try gate?.finish() } catch { thrown = error }
@@ -573,7 +616,7 @@ public final class Capture {
             throw JournalError("Device has no usable input format")
         }
         self.writer = writer
-        node.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, _ in
+        node.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, time in
             var actual: AudioDeviceID = 0
             var size = UInt32(MemoryLayout<AudioDeviceID>.size)
             guard
@@ -597,7 +640,16 @@ public final class Capture {
                 writer.onError?("Input UID changed. No replacement-device audio was saved.")
                 return
             }
-            writer.enqueue(buffer)
+            if let anchor = writer.hostAnchor {
+                let sample =
+                    time.isHostTimeValid ? AVAudioTime.seconds(forHostTime: time.hostTime) : nil
+                let stamp = AudioSources.timestamp(
+                    sample: sample, anchor: anchor,
+                    now: AVAudioTime.seconds(forHostTime: mach_absolute_time()))
+                writer.enqueue(buffer, at: stamp.offset, clock: stamp.clock)
+            } else {
+                writer.enqueue(buffer)
+            }
         }
         do { try engine.start() } catch {
             node.removeTap(onBus: 0)

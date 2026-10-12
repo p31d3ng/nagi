@@ -5,11 +5,12 @@ import JournalCore
 import SwiftUI
 
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
-    static var stop: (() -> Void)?
+    static var stop: ((@escaping () -> Void) -> Void)?
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        Self.stop?()
-        return .terminateNow
+        guard let stop = Self.stop else { return .terminateNow }
+        stop { sender.reply(toApplicationShouldTerminate: true) }
+        return .terminateLater
     }
 }
 @MainActor final class PlaybackMeter: ObservableObject {
@@ -19,6 +20,7 @@ import SwiftUI
 @MainActor final class CaptureMeter: ObservableObject {
     @Published var level = 0.0
     @Published var elapsed = 0
+    @Published var systemLevel = 0.0
 }
 @MainActor final class Journal: ObservableObject {
     let meter = CaptureMeter()
@@ -60,6 +62,20 @@ import SwiftUI
     @Published var status = "Ready · choose an input"
     @Published var processing = "Idle · audio stays on this Mac"
     @Published var recording = false
+    @Published var captureBusy = false
+    @Published var captureStarting = false
+    @Published var includeSystemAudio = false
+    @Published var systemAudioPermitted = false
+    var systemLevel: Double {
+        get { meter.systemLevel }
+        set { meter.systemLevel = newValue }
+    }
+    @Published var playbackOrigin: AudioOrigin = .legacy
+    @Published var playbackSources: [AudioOrigin] = [.legacy]
+    @Published var sourceNotices: [String] = []
+    private var startTask: Task<Void, Never>?
+    private var systemCapture: SystemAudioCapture?
+    private var systemWriter: ChunkWriter?
     @Published var error: String?
     @Published var connectionPrompt = false
     @Published var query = ""
@@ -157,6 +173,8 @@ import SwiftUI
         savingMode = store.setting("saving-mode", fallback: AudioSavingMode.speechOnly.rawValue)
         liveMode = store.setting("live-mode", fallback: "balanced")
         inputUID = store.setting("inputUID")
+        includeSystemAudio = store.setting("system-audio") == "1"
+        systemAudioPermitted = SystemAudioCapture.permitted()
         model = store.setting("model", fallback: "unified")
         preferredWords = store.setting("preferredWords")
         keepAwake = store.setting("keepAwake") == "true"
@@ -216,12 +234,23 @@ import SwiftUI
         NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.microphonePermission.refresh() }
+            Task { @MainActor in
+                self?.microphonePermission.refresh(); self?.checkSystemAudioPermission()
+            }
         }
         NotificationCenter.default.addObserver(
             forName: Notification.Name("NagiQuit"), object: nil, queue: .main
         ) { [weak self] _ in Task { @MainActor in self?.stop(note: "App quit") } }
-        AppDelegate.stop = { [weak self] in self?.stop(note: "App quit") }
+        AppDelegate.stop = { [weak self] completion in
+            self?.stop(note: "App quit")
+            Task { @MainActor in
+                let deadline = Date().addingTimeInterval(10)
+                while self?.captureBusy == true && Date() < deadline {
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
+                completion()
+            }
+        }
         if syntheticMonitor {
             status = "Synthetic test monitor · no microphone"
             meterTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) {
@@ -254,6 +283,34 @@ import SwiftUI
                 .sorted()
             if speakerChoices != choices { speakerChoices = choices }
             if let selected {
+                let sources =
+                    try store.exec(
+                        "SELECT DISTINCT COALESCE(s.origin,'legacy') AS origin FROM chunks c LEFT JOIN chunk_sources s ON s.chunk=c.id WHERE c.session=? ORDER BY origin",
+                        [selected]
+                    )
+                    .compactMap { AudioOrigin(rawValue: $0["origin"] ?? "legacy") }
+                if playbackSources != sources { playbackSources = sources }
+                if !sources.contains(playbackOrigin) { playbackOrigin = sources.first ?? .legacy }
+                let sourceRows = try store.exec(
+                    "SELECT origin,status,detail FROM source_status WHERE session=? ORDER BY origin",
+                    [selected])
+                let gaps = try store.exec(
+                    "SELECT origin,start,end,reason FROM source_gaps WHERE session=? ORDER BY start DESC LIMIT 5",
+                    [selected])
+                let notices =
+                    sourceRows.map {
+                        (AudioOrigin(rawValue: $0["origin"] ?? "legacy") ?? .legacy).title + " · "
+                            + ($0["status"] ?? "unknown")
+                            + ($0["detail"].flatMap { $0.isEmpty ? nil : " · " + $0 } ?? "")
+                    }
+                    + gaps.map {
+                        (AudioOrigin(rawValue: $0["origin"] ?? "legacy") ?? .legacy).title
+                            + " · gap "
+                            + String(
+                                format: "%.2f–%.2f s", Double($0["start"] ?? "0") ?? 0,
+                                Double($0["end"] ?? "0") ?? 0) + " · " + ($0["reason"] ?? "unknown")
+                    }
+                if sourceNotices != notices { sourceNotices = notices }
                 let omitted =
                     Double(
                         try store
@@ -269,7 +326,9 @@ import SwiftUI
                 if savingSummary != nextSavingSummary { savingSummary = nextSavingSummary }
                 let nextRecordingDetails =
                     store.setting("metadata-" + selected) + "\n"
-                    + store.setting("format-" + selected) + "\n" + store.setting("live-" + selected)
+                    + store.setting("format-" + selected) + "\n"
+                    + store.setting("format-" + selected + "-system") + "\n"
+                    + store.setting("live-" + selected)
                 if recordingDetails != nextRecordingDetails {
                     recordingDetails = nextRecordingDetails
                 }
@@ -373,6 +432,9 @@ import SwiftUI
 
     }
     func selectInput(_ uid: String) {
+        guard !captureBusy else {
+            error = "Wait for capture startup/finalization before changing input."; return
+        }
         guard !syntheticMonitor else { return }
         do {
             try InputSelection.persist(
@@ -428,6 +490,7 @@ import SwiftUI
         ensureLive()
     }
     private func ensureLive() {
+        guard systemCapture == nil else { return }
         guard recording, !enrollment, let id = sessionID, liveTranscriber == nil else { return }
         guard model == "unified" else {
             liveStatus =
@@ -481,7 +544,30 @@ import SwiftUI
         }
         processor.prepareLive { live.start() }
     }
+    func saveSystemAudio() {
+        guard !recording, !captureBusy else { return }
+        do { try store.set("system-audio", includeSystemAudio ? "1" : "0") } catch {
+            self.error = error.localizedDescription
+        }
+    }
+    func checkSystemAudioPermission() { systemAudioPermitted = SystemAudioCapture.permitted() }
+    func requestSystemAudioPermission() {
+        guard !syntheticMonitor, !recording, !captureBusy else { return }
+        systemAudioPermitted = SystemAudioCapture.requestPermission()
+    }
     func start(enroll: Bool = false) {
+        guard !captureBusy else {
+            error = "Capture is starting or finalizing. Please wait, or cancel startup."; return
+        }
+        if includeSystemAudio && !enroll {
+            checkSystemAudioPermission()
+            guard systemAudioPermitted else {
+                error =
+                    "Request system audio access explicitly in Settings → Devices. Both sources remain stopped until permission is available.";
+                return
+            }
+        }
+
         guard recording || liveTranscriber == nil else {
             error =
                 "Finishing the previous live preview. Please wait a moment before starting again."
@@ -518,21 +604,38 @@ import SwiftUI
                     "Selected input changed or disconnected. Select it in Settings → Devices and start again."
                 return
             }
-            self.begin(device: device, enroll: enroll)
+            self.startTask = Task { await self.begin(device: device, enroll: enroll) }
         }
     }
 
-    private func begin(device: InputDevice, enroll: Bool) {
+    private func begin(device: InputDevice, enroll: Bool) async {
+        guard !captureBusy, !recording else { return }
+        captureBusy = true; captureStarting = true
+        defer { captureBusy = false; captureStarting = false; startTask = nil }
         stopPlayback()
+        let dual = includeSystemAudio && !enroll
+        let stream = dual ? SystemAudioCapture() : nil
+        status = dual ? "Preparing microphone + system audio…" : "Preparing microphone…"
         do {
-            let speechOnly = !enroll && savingMode == AudioSavingMode.speechOnly.rawValue
+            if let stream { try await stream.prepare() }
+            try Task.checkCancellation()
+            guard inputUID == device.id, Devices.inputs().contains(where: { $0.id == device.id })
+            else {
+                throw JournalError(
+                    "Selected microphone changed or disappeared during startup. Nothing will fall back."
+                )
+            }
+            let speechOnly = !dual && !enroll && savingMode == AudioSavingMode.speechOnly.rawValue
             let detector = speechOnly ? try SpeechVAD(project: project) : nil
+            let anchor = dual ? AVAudioTime.seconds(forHostTime: mach_absolute_time()) : nil
             started = Date()
             let id = try store.createSession(
                 title: enroll
                     ? "Voice profile enrollment"
                     : "Conversation · " + Date().formatted(date: .abbreviated, time: .shortened),
-                device: device.name + " | " + device.id, model: model)
+                device: device.name + " | " + device.id, model: model,
+                at: started.timeIntervalSince1970)
+            sessionID = id
             try store.set(
                 "metadata-" + id,
                 "engine=5d66f602;model=\(Models.all.first{$0.id==model}!.revision);threads=2;backend=metal;capture=original-rate CAF + gzip;vad=RMS 0.0001;language=script estimate;preferred=\(preferredWords);rules=\(store.setting("rules"));diarization=Community1/fc8c3e4 nonexclusive + precluster overlap; unified=streaming canonical / approximate offline times / 0.75s context / midpoint ownership; chunk=10s exact"
@@ -543,7 +646,36 @@ import SwiftUI
                 try store.set(
                     "enrollment-result", "Recording enrollment audio · profile is not saved yet")
             }
-            let writer = ChunkWriter(store: store, session: id, model: model)
+            let writer = ChunkWriter(
+                store: store, session: id, model: model, started: started.timeIntervalSince1970,
+                origin: .microphone, hostAnchor: anchor)
+            try AudioSources.status(store, session: id, origin: .microphone, status: "preparing")
+            if let stream {
+                let system = ChunkWriter(
+                    store: store, session: id, model: model, started: started.timeIntervalSince1970,
+                    origin: .system, hostAnchor: anchor)
+                system.onChunk = { [weak self] in self?.processor.schedule() }
+                system.onLevel = { [weak self] level in
+                    DispatchQueue.main.async {
+                        if let self, self.sessionID == id { self.systemLevel = min(1, level * 8) }
+                    }
+                }
+                system.onError = { [weak self] message in
+                    DispatchQueue.main.async {
+                        self?.error = message; self?.stop(note: "System source gap: " + message)
+                    }
+                }
+                stream.onError = system.onError
+                systemWriter = system; systemCapture = stream
+                try AudioSources.status(
+                    store, session: id, origin: .system, status: "preparing",
+                    detail: "SCK 48 kHz stereo; own process excluded; no screen pixels; continuous")
+                try store.set(
+                    "metadata-" + id,
+                    store.setting("metadata-" + id)
+                        + ";sources=microphone+system;clock=host/arrival-fallback;echo=evidence-only;continuous-override=true"
+                )
+            }
             if let detector { try writer.enableSpeechOnly(vad: detector) }
             try store.set("saving-" + id, speechOnly ? "speechOnly" : "continuous")
             try store.set(
@@ -566,8 +698,9 @@ import SwiftUI
             }
             writer.onError = { [weak self] error in
                 DispatchQueue.main.async {
-                    self?.stop(note: "Capture gap: " + error)
-                    self?.error = error
+                    guard let self, self.sessionID == id else { return }
+                    self.stop(note: "Capture gap: " + error)
+                    self.error = error
                 }
             }
             writer.onChunk = { [weak self] in self?.processor.schedule() }
@@ -576,8 +709,21 @@ import SwiftUI
             writer.onSpanEnded = { _ in feed.endSpan() }
             self.writer = writer
             sessionID = id
-            if liveRequested, !enroll, model == "unified" { startLive(for: id) }
-            do { try capture.start(device: device, writer: writer) } catch {
+            if liveRequested, !enroll, !dual, model == "unified" { startLive(for: id) }
+            do {
+                if let stream, let systemWriter { try await stream.start(writer: systemWriter) }
+                try Task.checkCancellation()
+                guard inputUID == device.id else {
+                    throw JournalError("Selected microphone changed during startup")
+                }
+                try capture.start(device: device, writer: writer)
+                try AudioSources.status(
+                    store, session: id, origin: .microphone, status: "recording")
+                if dual {
+                    try AudioSources.status(
+                        store, session: id, origin: .system, status: "recording")
+                }
+            } catch {
                 try store.finish(id, note: "Could not start: \(error.localizedDescription)")
                 throw error
             }
@@ -586,13 +732,15 @@ import SwiftUI
             recording = true
             activeLiveSession = id
             enrollment = enroll
-            if liveRequested { ensureLive() }
+            if liveRequested && !dual { ensureLive() }
             elapsed = 0
             savingSpeech = !speechOnly
             status =
-                speechOnly
-                ? "Listening · speech-only saving · " + device.name
-                : "Recording continuously · " + device.name
+                dual
+                ? "Recording continuously · microphone + system audio"
+                : speechOnly
+                    ? "Listening · speech-only saving · " + device.name
+                    : "Recording continuously · " + device.name
             if keepAwake {
                 IOPMAssertionCreateWithName(
                     kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
@@ -601,7 +749,25 @@ import SwiftUI
             }
             refresh()
         } catch {
+            stream?.close()
             try? capture.stop()
+            try? writer?.finish()
+            try? systemWriter?.finish()
+            if let id = sessionID {
+                try? store.finish(
+                    id, note: "Capture startup failed/cancelled: " + error.localizedDescription)
+                try? AudioSources.status(
+                    store, session: id, origin: .microphone, status: "failed",
+                    detail: error.localizedDescription)
+                if dual {
+                    try? AudioSources.status(
+                        store, session: id, origin: .system, status: "failed",
+                        detail: error.localizedDescription)
+                }
+            }
+            await stream?.stop()
+            systemCapture = nil; systemWriter = nil; systemLevel = 0
+            processor.schedule()
             liveFeed.set(nil)
             liveTranscriber?.stop()
             writer = nil
@@ -613,14 +779,47 @@ import SwiftUI
     }
     func stop(note: String = "") {
         guard !syntheticMonitor else { return }
-        guard recording else { return }
+        guard recording else {
+            if captureBusy { startTask?.cancel(); status = "Cancelling capture startup…" }
+            return
+        }
+        let stream = systemCapture
+        stream?.close()
+        let system = systemWriter
+        systemCapture = nil; systemWriter = nil; systemLevel = 0
+        if let stream {
+            captureBusy = true
+            Task {
+                await stream.stop(); self.captureBusy = false
+            }
+        }
         let wasEnrollment = enrollment
         var noSpeech = false
         recording = false
         enrollment = false
         do {
-            try capture.stop()
+            var captureError: Error?
+            do { try capture.stop() } catch { captureError = error }
+            do { try system?.finish() } catch { if captureError == nil { captureError = error } }
+            if let captureError { throw captureError }
             if let id = sessionID {
+                try AudioSources.status(
+                    store, session: id, origin: .microphone, status: "finished", detail: note)
+                if let system {
+                    try AudioSources.status(
+                        store, session: id, origin: .system, status: "finished", detail: note)
+                    let end = Date().timeIntervalSince(started)
+                    if let writer, end - writer.writtenDuration > 0.02 {
+                        try AudioSources.gap(
+                            store, session: id, origin: .microphone, start: writer.writtenDuration,
+                            end: end, reason: note.isEmpty ? "no_samples_before_stop" : note)
+                    }
+                    if end - system.writtenDuration > 0.02 {
+                        try AudioSources.gap(
+                            store, session: id, origin: .system, start: system.writtenDuration,
+                            end: end, reason: "no_samples_before_stop")
+                    }
+                }
                 let savedChunks = try store.chunks(session: id)
                 noSpeech = store.setting("saving-" + id) == "speechOnly" && savedChunks.isEmpty
                 try store.finish(
@@ -640,6 +839,14 @@ import SwiftUI
         } catch {
             self.error = error.localizedDescription
             if let id = sessionID {
+                try? AudioSources.status(
+                    store, session: id, origin: .microphone, status: "failed",
+                    detail: error.localizedDescription)
+                if system != nil {
+                    try? AudioSources.status(
+                        store, session: id, origin: .system, status: "failed",
+                        detail: error.localizedDescription)
+                }
                 try? store.finish(
                     id, note: "Capture finalization gap: " + error.localizedDescription)
             }
@@ -689,7 +896,7 @@ import SwiftUI
                         "metadata-" + id,
                         "Imported timestamp unknown; expiry starts at import. engine=5d66f602; model=\(model); threads=2; backend=Metal; sequential Community1 nonexclusive + precluster overlap; unified=streaming canonical / approximate offline times / 0.75s context; chunk=10s exact; rules=\(store.setting("rules"))"
                     )
-                    let writer = ChunkWriter(store: store, session: id, model: model)
+                    let writer = ChunkWriter(store: store, session: id, model: model, origin: .file)
                     try writer.importFile(url)
                     try store.finish(id)
                     DispatchQueue.main.async {
@@ -701,10 +908,40 @@ import SwiftUI
                 } catch { DispatchQueue.main.async { self?.error = error.localizedDescription } }
             }
     }
-    func play(_ segment: Segment) { playConversation(session: segment.session, at: segment.offset) }
-    func playConversation(session: String, at offset: Double = 0) {
-        guard !recording else { error = "Stop recording before playing saved audio."; return }
-        playbackNotice = ""; conversationPlayer.start(session: session, at: offset)
+    func play(_ segment: Segment) {
+        playConversation(session: segment.session, at: segment.offset, origin: segment.origin)
+    }
+    func playConversation(session: String, at offset: Double = 0, origin: AudioOrigin? = nil) {
+        guard !recording, !captureBusy else {
+            error = "Stop recording before playing saved audio."; return
+        }
+        let source = origin ?? playbackOrigin
+        playbackOrigin = source
+        let firstOffset =
+            (try? AudioSources.firstOffset(store, session: session, origin: source)) ?? 0
+        let begin = offset == 0 ? firstOffset : offset
+        playbackNotice =
+            source.title
+            + (begin > offset
+                ? " · starts at first saved span (\(String(format: "%.2f", begin)) s); initial capture gap"
+                : "")
+        conversationPlayer.start(session: session, at: begin, origin: source)
+    }
+    func playSummarySource(session: String, source: SummarySource) {
+        // The wire ID stays unchanged. Local source ownership is resolved from that segment.
+        let segmentID = Int(source.segmentId.dropFirst()) ?? -1
+        let chunk =
+            (try? store
+                .exec("SELECT chunk FROM segments WHERE id=? AND session=?", [segmentID, session])
+                .first?["chunk"]) ?? ""
+        playConversation(
+            session: session, at: source.start, origin: AudioSources.origin(store, chunk: chunk))
+    }
+    func dismissEcho(_ segment: Segment, dismissed: Bool) {
+        do {
+            try AudioSources.dismissEcho(store, chunk: segment.chunk, dismissed: dismissed);
+            refresh()
+        } catch { self.error = error.localizedDescription }
     }
     func pausePlayback() { conversationPlayer.pause() }
     func resumePlayback() { conversationPlayer.resume() }
@@ -788,10 +1025,16 @@ struct MenuView: View {
             openWindow(id: "journal")
             NSApp.activate(ignoringOtherApps: true)
         }
-        Button(journal.recording ? "Stop and save" : "Start recording") {
-            journal.recording ? journal.stop() : journal.start()
+        Button(
+            journal.recording
+                ? "Stop and save"
+                : journal.captureBusy
+                    ? (journal.captureStarting ? "Cancel startup" : "Finalizing…")
+                    : "Start recording"
+        ) {
+            (journal.recording || journal.captureBusy) ? journal.stop() : journal.start()
         }
-        .disabled(journal.syntheticMonitor)
+        .disabled(journal.syntheticMonitor || (journal.captureBusy && !journal.captureStarting))
         Divider()
         Button("Quit Nagi") {
             journal.stop(note: "App quit")

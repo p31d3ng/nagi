@@ -111,4 +111,26 @@ import XCTest
         try await until({ player.state == .ended })
         XCTAssertEqual(player.position, 1.05, accuracy: 0.002)
     }
+    func testSourcePlaybackDoesNotCrossOriginsAndSeekKeepsSource() async throws {
+        let id = try fixture(offsets: [0, 0.35])
+        let chunks = try store.chunks(session: id)
+        for c in chunks {
+            try store.exec("UPDATE chunk_sources SET origin='system' WHERE chunk=?", [c.id])
+        }
+        let mic = try store.registerChunk(
+            session: id, path: chunks[0].path, captured: Date().timeIntervalSince1970, offset: 0,
+            model: "unified", origin: .microphone)
+        try store.seal(mic, duration: 0.35)
+        let player = ConversationPlayback(store: store); player.volume = 0
+        player.start(session: id, origin: .microphone)
+        try await until({ player.state == .ended })
+        XCTAssertEqual(player.position, 0.35, accuracy: 0.002)
+        player.start(session: id, origin: .system)
+        try await until({ player.state == .playing })
+        player.seek(to: 0.4)
+        try await until({ player.state == .ended })
+        XCTAssertEqual(player.position, 0.7, accuracy: 0.002)
+        XCTAssertEqual(player.origin, .system)
+    }
+
 }

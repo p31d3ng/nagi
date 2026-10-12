@@ -25,6 +25,9 @@ public struct Segment: Identifiable, Sendable, Equatable {
     public let speaker: String
     public let language: String
     public let chunk: String
+    public var origin: AudioOrigin = .legacy
+    public var possibleEcho: Bool = false
+    public var echoDismissed: Bool = false
 }
 public struct Chunk: Sendable {
     public let id: String
@@ -122,6 +125,7 @@ public final class Store: @unchecked Sendable {
             "CREATE TABLE IF NOT EXISTS profiles(id TEXT PRIMARY KEY,embedding TEXT,model TEXT,created REAL)"
         )
         try SummaryStorage.install(self)
+        try AudioSources.install(self)
     }
     deinit { sqlite3_close(db) }
     @discardableResult public func exec(_ sql: String, _ bindings: [Any] = []) throws -> [[String:
@@ -216,12 +220,16 @@ public final class Store: @unchecked Sendable {
         .isEmpty) == false)
     }
     public func registerChunk(
-        session: String, path: String, captured: Double, offset: Double, model: String
+        session: String, path: String, captured: Double, offset: Double, model: String,
+        origin: AudioOrigin = .legacy, clock: String = "frames"
     ) throws -> String {
         let id = UUID().uuidString
-        try exec(
-            "INSERT INTO chunks(id,session,path,captured,offset,duration,status,model) VALUES(?,?,?,?,?,0,'writing',?)",
-            [id, session, path, captured, offset, model])
+        try transaction {
+            try exec(
+                "INSERT INTO chunks(id,session,path,captured,offset,duration,status,model) VALUES(?,?,?,?,?,0,'writing',?)",
+                [id, session, path, captured, offset, model])
+            try exec("INSERT INTO chunk_sources VALUES(?,?,?)", [id, origin.rawValue, clock])
+        }
         return id
     }
     public func seal(_ id: String, duration: Double) throws {
@@ -263,9 +271,10 @@ public final class Store: @unchecked Sendable {
     public func neighbor(_ chunk: Chunk, before: Bool) throws -> Chunk? {
         try readChunks(
             "SELECT * FROM chunks WHERE session=? AND offset" + (before ? "<?" : " >?")
-                + " AND status!='writing' ORDER BY offset " + (before ? "DESC" : "ASC")
+                + " AND " + AudioSources.sameOriginSQL + " AND status!='writing' ORDER BY offset "
+                + (before ? "DESC" : "ASC")
                 + " LIMIT 1",
-            [chunk.session, chunk.offset]
+            [chunk.session, chunk.offset, AudioSources.origin(self, chunk: chunk.id).rawValue]
         )
         .first
     }
@@ -301,7 +310,7 @@ public final class Store: @unchecked Sendable {
             values.append(language)
         }
         return try exec(
-            "SELECT * FROM segments"
+            "SELECT segments.*,COALESCE((SELECT origin FROM chunk_sources WHERE chunk=segments.chunk),'legacy') AS audio_origin, EXISTS(SELECT 1 FROM echo_annotations WHERE mic=segments.chunk AND dismissed=0) AS possible_echo, EXISTS(SELECT 1 FROM echo_annotations WHERE mic=segments.chunk AND dismissed=1) AS echo_dismissed FROM segments"
                 + (predicates.isEmpty ? "" : " WHERE " + predicates.joined(separator: " AND "))
                 + " ORDER BY session,offset LIMIT 2000", values
         )
@@ -309,7 +318,10 @@ public final class Store: @unchecked Sendable {
             Segment(
                 id: Int($0["id"]!)!, session: $0["session"]!, offset: Double($0["offset"]!)!,
                 end: Double($0["end"]!)!, raw: $0["raw"]!, corrected: $0["corrected"]!,
-                speaker: $0["speaker"]!, language: $0["language"]!, chunk: $0["chunk"]!)
+                speaker: $0["speaker"]!, language: $0["language"]!, chunk: $0["chunk"]!,
+                origin: AudioOrigin(rawValue: $0["audio_origin"] ?? "legacy") ?? .legacy,
+                possibleEcho: $0["possible_echo"] == "1", echoDismissed: $0["echo_dismissed"] == "1"
+            )
         }
     }
     public func insertSegment(
@@ -431,6 +443,9 @@ public final class Store: @unchecked Sendable {
             && FileManager.default.fileExists(atPath: root.appendingPathComponent(chunk.path).path)
     }
     public func recover() throws {
+        try exec(
+            "UPDATE source_status SET status='interrupted',detail='Capture interrupted; durable chunks recovered.' WHERE status IN ('recording','preparing')"
+        )
         try exec(
             "UPDATE chunks SET status='queued',error='Worker interrupted; retry available' WHERE status='processing'"
         )

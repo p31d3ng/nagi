@@ -130,8 +130,9 @@ public final class Processor: @unchecked Sendable {
                 "status"]
                 == "recording",
             try store.exec(
-                "SELECT id FROM chunks WHERE session=? AND offset>? AND status!='writing' LIMIT 1",
-                [chunk.session, chunk.offset]
+                "SELECT id FROM chunks WHERE session=? AND offset>? AND "
+                    + AudioSources.sameOriginSQL + " AND status!='writing' LIMIT 1",
+                [chunk.session, chunk.offset, AudioSources.origin(store, chunk: chunk.id).rawValue]
             )
             .isEmpty,
             try store.exec(
@@ -176,7 +177,11 @@ public final class Processor: @unchecked Sendable {
                     try store.exec("UPDATE chunks SET status='expired' WHERE id=?", [chunk.id])
                     continue
                 }
-                do { try autoreleasepool { try process(chunk) } } catch {
+                do {
+                    try autoreleasepool {
+                        try process(chunk); try? EchoAnalyzer.analyze(chunk, store: store)
+                    }
+                } catch {
                     try store.exec(
                         "UPDATE chunks SET status='failed',error=? WHERE id=?",
                         [error.localizedDescription, chunk.id])

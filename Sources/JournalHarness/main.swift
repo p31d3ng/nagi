@@ -152,6 +152,48 @@ do {
             "GATE-RESULT " + String(
                 data: try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys]),
                 encoding: .utf8)!)
+    case "dual-source":
+        guard args.count >= 6 else {
+            throw JournalError(
+                "dual-source data microphone-fixture system-fixture project [crash-at-seconds]")
+        }
+        let model = args.count > 7 ? args[7] : "unified"
+        guard Models.all.contains(where: { $0.id == model }) else {
+            throw JournalError("Unknown synthetic model")
+        }
+        let id = try store.createSession(
+            title: "Synthetic dual sources", device: "generated fixture", model: model)
+        for origin in [AudioOrigin.microphone, .system] {
+            try AudioSources.status(store, session: id, origin: origin, status: "recording")
+        }
+        let crashAt = args.count > 6 ? Double(args[6]) ?? -1 : -1
+        try measure("dual capture/write") {
+            for (origin, path) in [(AudioOrigin.microphone, args[3]), (.system, args[4])] {
+                let writer = ChunkWriter(
+                    store: store, session: id, model: model, origin: origin, hostAnchor: 0)
+                let input = try AVAudioFile(forReading: URL(fileURLWithPath: path))
+                let buffer = AVAudioPCMBuffer(
+                    pcmFormat: input.processingFormat, frameCapacity: 4096)!
+                while input.framePosition < input.length {
+                    let offset = Double(input.framePosition) / input.processingFormat.sampleRate
+                    try input.read(into: buffer)
+                    try writer.write(buffer, at: offset, clock: "host")
+                    if crashAt >= 0 && offset >= crashAt { fflush(stdout); _exit(75) }
+                }
+                try writer.finish()
+                try AudioSources.status(store, session: id, origin: origin, status: "finished")
+            }
+            try store.finish(id)
+        }
+        let processor = try Processor(store: store, project: URL(fileURLWithPath: args[5]))
+        processor.onStatus = { print($0) }; try processor.retry()
+        measure("dual sequential ASR + speakers + compression + echo") { processor.waitUntilIdle() }
+        let segments = try store.segments(session: id)
+        for origin in [AudioOrigin.microphone, .system] {
+            print("SOURCE \(origin.rawValue) spans=\(segments.filter { $0.origin==origin }.count)")
+        }
+        let remaining = try store.chunks(status: "queued").count
+        print("QUEUED \(remaining)")
     case "import":
         let id = try store.createSession(
             title: "Synthetic fixture", device: "synthetic", model: "unified")
