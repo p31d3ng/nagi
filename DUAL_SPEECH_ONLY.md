@@ -53,14 +53,15 @@ expiry, backup exclusion, transcript cap and local voice profile policies remain
 
 ## Validation
 
-The final applicable suite passed 128 tests, zero failures in 28.885 seconds,
+The final applicable suite passed 130 tests, zero failures in 28.032 seconds,
 including the playback wording clarification. New cases cover independent gates,
 overlap, a louder non-speech stereo channel beside weaker speech, exact original
 samples/offsets, gradual drift, clock discontinuities/quality changes, invalid
 probabilities, detector failure, sealed earlier speech, per-source progress/recovery,
 legacy behavior, source-only lookahead without loading ML, playback omission versus
 another source's gap, missing echo reference, original-timestamp expiry and native
-recurrent-state reset. Existing cancellation/error-provenance and zero-upload fake
+recurrent-state reset, including both public VAD convenience constructors across
+epoch/timestamp boundaries. Existing cancellation/error-provenance and zero-upload fake
 transport tests also pass. Full output remains in ignored reports/.
 
 An abrupt isolated dual-gate harness exit (75) at 20 seconds recovered three chunks:

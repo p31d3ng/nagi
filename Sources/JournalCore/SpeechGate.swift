@@ -83,7 +83,10 @@ public final class SpeechGate {
     public var onActivity: ((Bool) -> Void)?
     public private(set) var peakBufferedFrames = 0
     public init(score: @escaping ([Float]) throws -> Float) { self.score = score }
-    public convenience init(vad: SpeechVAD) { self.init(score: { try vad.probability($0) }) }
+    public convenience init(vad: SpeechVAD) {
+        self.init(score: { try vad.probability($0) })
+        resetScore = { vad.reset() }
+    }
     /// One recurrent state per channel. Keep all original channels if any detects speech.
     public convenience init(project: URL) throws {
         var detectors = [try SpeechVAD(project: project)]

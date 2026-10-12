@@ -226,4 +226,35 @@ final class DualSpeechGateTests: XCTestCase {
         XCTAssertEqual(offsets[999], 2 + 999 * 0.03205, accuracy: 0.00000001)
     }
 
+    func testPublicVADConvenienceConstructorResetsActualDetectorAtEpochBoundary() throws {
+        let project = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let vad = try SpeechVAD(project: project), zeros = [Float](repeating: 0, count: 512)
+        let baseline = try vad.probability(zeros)
+        vad.reset()
+        let gate = SpeechGate(vad: vad)
+        for i in 0..<20 { try gate.feed(block([0.3]), at: Double(i) * 0.032) }
+        let warm = try vad.probability(zeros)
+        XCTAssertGreaterThan(
+            abs(warm - baseline), 0.000001, "Fixture must expose stale recurrent state")
+        try gate.endEpoch()
+        XCTAssertEqual(try vad.probability(zeros), baseline, accuracy: 0.000001)
+    }
+
+    func testChunkWriterVADConvenienceRestartsStateAtTimestampGap() throws {
+        let project = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let vad = try SpeechVAD(project: project), zeros = [Float](repeating: 0, count: 512)
+        _ = try vad.probability(zeros)
+        let expectedSecond = try vad.probability(zeros)
+        vad.reset()
+        let w = ChunkWriter(
+            store: store, session: try session(), model: "unified", origin: .microphone)
+        try w.enableSpeechOnly(vad: vad)
+        for i in 0..<20 { try w.write(block([0.3]), at: Double(i) * 0.032, clock: "host") }
+        try w.write(block([0]), at: 3, clock: "host")
+        XCTAssertEqual(try vad.probability(zeros), expectedSecond, accuracy: 0.000001)
+        try w.finish()
+    }
+
 }
