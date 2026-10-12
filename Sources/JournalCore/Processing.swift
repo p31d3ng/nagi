@@ -136,8 +136,10 @@ public final class Processor: @unchecked Sendable {
             )
             .isEmpty,
             try store.exec(
-                "SELECT 1 FROM audio_gaps WHERE session=? AND start>=? AND start<=? AND end>start AND reason='omitted_nonspeech' LIMIT 1",
+                "SELECT 1 FROM (SELECT session,start,end,reason FROM audio_gaps WHERE ?='legacy' UNION ALL SELECT session,start,end,reason FROM source_gaps WHERE origin=?) WHERE session=? AND start>=? AND start<=? AND end>start AND reason='omitted_nonspeech' LIMIT 1",
                 [
+                    AudioSources.origin(store, chunk: chunk.id).rawValue,
+                    AudioSources.origin(store, chunk: chunk.id).rawValue,
                     chunk.session, chunk.offset + chunk.duration - 0.002,
                     chunk.offset + chunk.duration + 0.002,
                 ]

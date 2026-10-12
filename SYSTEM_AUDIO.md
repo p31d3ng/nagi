@@ -1,4 +1,4 @@
-# Optional system audio — Nagi 0.5.0, build 12
+# Optional system audio — Nagi 0.6.0, build 13
 
 Enable **Settings → Devices → Include system audio for new conversations**.
 It is off by default. The selected microphone still uses its stable UID and never
@@ -28,12 +28,16 @@ new starts are disabled. Quit drains files, requests stream shutdown and allows 
 startup. Sleep stops recording with an explicit gap; locking/closing a window does
 not deliberately stop it, but actual SCK screen-lock behavior remains untested.
 
-Dual-source conversations use continuous saving even when the single-microphone
-preference is Speech only; the preference itself is preserved. Dual-source recording
-does not use VAD to omit audio and provides no speech-only storage savings. Quiet chunks may skip
-ASR but recorded audio remains. The streaming microphone preview is suspended for
-dual-source capture so archival ASR and diarization remain sequential on the existing
-processing lane. Completed source-labelled spans appear in Live and Timeline.
+As of 0.6.0, Storage's saved Speech only / Continuous preference applies to both
+sources independently for new conversations. Speech-only uses independent per-channel
+CPU detectors, approximately one second before/after speech, original timestamps and
+source-specific omissions/progress/recovery. Continuous remains available; faint or
+brief speech can be missed and music/noise may trigger saving. Active sessions and
+old recordings never change modes. Enrollment/imports stay continuous. The streaming
+microphone preview stays suspended for dual-source capture to keep archival ASR and
+diarization sequential. See [DUAL_SPEECH_ONLY.md](DUAL_SPEECH_ONLY.md) for new tests,
+benchmarks, compressed-byte savings and limitations. Older 0.5.0 measurements below
+are retained as historical system-audio evidence.
 
 Microphone AVAudioTime and SCK presentation timestamps share a host-time anchor and
 session wall-clock origin. Implausible/missing timestamps use an explicitly uncertain

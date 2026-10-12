@@ -45,6 +45,7 @@ import SwiftUI
     @Published var liveRevision = 0
     @Published var savingMode = AudioSavingMode.speechOnly.rawValue
     @Published var savingSpeech = false
+    @Published var systemSavingSpeech = false
     @Published var playbackNotice = ""
     @Published var savingSummary = ""
     @Published var liveEngineActive = false
@@ -306,12 +307,22 @@ import SwiftUI
                     }
                     + gaps.map {
                         (AudioOrigin(rawValue: $0["origin"] ?? "legacy") ?? .legacy).title
-                            + " · gap "
+                            + ($0["reason"] == "omitted_nonspeech"
+                                ? " · non-speech omitted " : " · gap ")
                             + String(
                                 format: "%.2f–%.2f s", Double($0["start"] ?? "0") ?? 0,
                                 Double($0["end"] ?? "0") ?? 0) + " · " + ($0["reason"] ?? "unknown")
                     }
                 if sourceNotices != notices { sourceNotices = notices }
+                let sourceOmitted = try store.exec(
+                    "SELECT origin,SUM(end-start) AS duration FROM source_gaps WHERE session=? AND reason='omitted_nonspeech' GROUP BY origin",
+                    [selected])
+                let sourceSavings =
+                    sourceOmitted.map {
+                        (AudioOrigin(rawValue: $0["origin"] ?? "legacy") ?? .legacy).title + " "
+                            + String(Int(Double($0["duration"] ?? "0") ?? 0)) + " s omitted"
+                    }
+                    .joined(separator: " · ")
                 let omitted =
                     Double(
                         try store
@@ -322,7 +333,10 @@ import SwiftUI
                             .first?["duration"] ?? "0") ?? 0
                 let nextSavingSummary =
                     store.setting("saving-" + selected) == "speechOnly"
-                    ? "Speech-only audio · \(Int(omitted)) seconds of non-speech omitted · original elapsed timestamps"
+                    ? "Speech-only audio · "
+                        + (sourceSavings.isEmpty
+                            ? "\(Int(omitted)) seconds omitted" : sourceSavings)
+                        + " · original elapsed timestamps"
                     : "Continuous audio"
                 if savingSummary != nextSavingSummary { savingSummary = nextSavingSummary }
                 let nextRecordingDetails =
@@ -481,7 +495,7 @@ import SwiftUI
         }
     }
     func saveSavingMode() {
-        guard !recording, AudioSavingMode(rawValue: savingMode) != nil else { return }
+        guard !recording, !captureBusy, AudioSavingMode(rawValue: savingMode) != nil else { return }
         do { try store.set("saving-mode", savingMode) } catch {
             self.error = error.localizedDescription
         }
@@ -616,6 +630,7 @@ import SwiftUI
         defer { captureBusy = false; captureStarting = false; startTask = nil }
         stopPlayback()
         let dual = includeSystemAudio && !enroll
+        let requestedSavingMode = savingMode
         let stream = dual ? SystemAudioCapture() : nil
         status = dual ? "Preparing microphone + system audio…" : "Preparing microphone…"
         do {
@@ -627,8 +642,9 @@ import SwiftUI
                     "Selected microphone changed or disappeared during startup. Nothing will fall back."
                 )
             }
-            let speechOnly = !dual && !enroll && savingMode == AudioSavingMode.speechOnly.rawValue
-            let detector = speechOnly ? try SpeechVAD(project: project) : nil
+            let speechOnly = !enroll && requestedSavingMode == AudioSavingMode.speechOnly.rawValue
+            let micGate = speechOnly ? try SpeechGate(project: project) : nil
+            let systemGate = dual && speechOnly ? try SpeechGate(project: project) : nil
             let anchor = dual ? AVAudioTime.seconds(forHostTime: mach_absolute_time()) : nil
             started = Date()
             let id = try store.createSession(
@@ -657,6 +673,13 @@ import SwiftUI
                 let system = ChunkWriter(
                     store: store, session: id, model: model, started: started.timeIntervalSince1970,
                     origin: .system, hostAnchor: anchor)
+                if let systemGate { try system.enableSpeechOnly(gate: systemGate) }
+                system.onActivity = { [weak self] active in
+                    DispatchQueue.main.async {
+                        guard let self, self.sessionID == id else { return }
+                        self.systemSavingSpeech = active
+                    }
+                }
                 system.onChunk = { [weak self] in self?.processor.schedule() }
                 system.onLevel = { [weak self] level in
                     DispatchQueue.main.async {
@@ -677,14 +700,15 @@ import SwiftUI
                 systemWriter = system; systemCapture = stream
                 try AudioSources.status(
                     store, session: id, origin: .system, status: "preparing",
-                    detail: "SCK 48 kHz stereo; own process excluded; no screen pixels; continuous")
+                    detail: "SCK 48 kHz stereo; own process excluded; no screen pixels; saving="
+                        + (speechOnly ? "speechOnly" : "continuous"))
                 try store.set(
                     "metadata-" + id,
                     store.setting("metadata-" + id)
-                        + ";sources=microphone+system;clock=host/arrival-fallback;echo=evidence-only;continuous-override=true"
+                        + ";sources=microphone+system;clock=host/arrival-fallback;echo=evidence-only;independent-source-gates=true"
                 )
             }
-            if let detector { try writer.enableSpeechOnly(vad: detector) }
+            if let micGate { try writer.enableSpeechOnly(gate: micGate) }
             try store.set("saving-" + id, speechOnly ? "speechOnly" : "continuous")
             try store.set(
                 "metadata-" + id,
@@ -695,6 +719,7 @@ import SwiftUI
                 DispatchQueue.main.async {
                     guard let self, self.sessionID == id, self.recording else { return }
                     self.savingSpeech = active
+                    if dual { return }
                     self.status =
                         active
                         ? "Saving speech + short buffers · " + device.name
@@ -745,9 +770,12 @@ import SwiftUI
             if liveRequested && !dual { ensureLive() }
             elapsed = 0
             savingSpeech = !speechOnly
+            systemSavingSpeech = dual && !speechOnly
             status =
                 dual
-                ? "Recording continuously · microphone + system audio"
+                ? (speechOnly
+                    ? "Listening · independent speech-only microphone + system audio"
+                    : "Recording continuously · microphone + system audio")
                 : speechOnly
                     ? "Listening · speech-only saving · " + device.name
                     : "Recording continuously · " + device.name
@@ -779,7 +807,7 @@ import SwiftUI
                 }
             }
             await stream?.stop()
-            systemCapture = nil; systemWriter = nil; systemLevel = 0
+            systemCapture = nil; systemWriter = nil; systemLevel = 0; systemSavingSpeech = false
             processor.schedule()
             liveFeed.set(nil)
             liveTranscriber?.stop()
@@ -814,7 +842,7 @@ import SwiftUI
         let stream = systemCapture
         stream?.close()
         let system = systemWriter
-        systemCapture = nil; systemWriter = nil; systemLevel = 0
+        systemCapture = nil; systemWriter = nil; systemLevel = 0; systemSavingSpeech = false
         if let stream {
             captureBusy = true
             Task {
@@ -948,10 +976,13 @@ import SwiftUI
         let firstOffset =
             (try? AudioSources.firstOffset(store, session: session, origin: source)) ?? 0
         let begin = offset == 0 ? firstOffset : offset
+        let leadingReason =
+            AudioSources.omitted(store, session: session, origin: source, start: offset, end: begin)
+            ? "non-speech omitted" : "initial capture gap"
         playbackNotice =
             source.title
             + (begin > offset
-                ? " · starts at first saved span (\(String(format: "%.2f", begin)) s); initial capture gap"
+                ? " · starts at first saved span (\(String(format: "%.2f", begin)) s); \(leadingReason)"
                 : "")
         conversationPlayer.start(session: session, at: begin, origin: source)
     }

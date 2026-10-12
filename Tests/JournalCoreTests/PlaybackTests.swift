@@ -133,4 +133,35 @@ import XCTest
         XCTAssertEqual(player.origin, .system)
     }
 
+    func testSpeechOnlyOmissionNeverHidesAnotherSourcesCaptureGap() async throws {
+        let id = try fixture(offsets: [0, 1])
+        let chunks = try store.chunks(session: id)
+        for c in chunks {
+            try store.exec("UPDATE chunk_sources SET origin='microphone' WHERE chunk=?", [c.id])
+            let path = "audio/" + UUID().uuidString + ".caf.gz"
+            try FileManager.default.copyItem(
+                at: Archive.readable(c, store: store), to: store.root.appendingPathComponent(path))
+            let s = try store.registerChunk(
+                session: id, path: path, captured: c.captured, offset: c.offset, model: "unified",
+                origin: .system)
+            try store.seal(s, duration: c.duration)
+        }
+        try AudioSources.progress(store, session: id, origin: .microphone, end: 1.35)
+        try AudioSources.progress(store, session: id, origin: .system, end: 1.35)
+        try AudioSources.gap(
+            store, session: id, origin: .microphone, start: 0.35, end: 1,
+            reason: "omitted_nonspeech")
+        let player = ConversationPlayback(store: store); player.volume = 0
+        var skips: [String] = [], errors: [String] = []
+        player.onSkippedSilence = { skips.append($0) }; player.onMessage = { errors.append($0) }
+        player.start(session: id, origin: .microphone)
+        try await until({ player.state == .ended })
+        XCTAssertEqual(player.position, 1.35, accuracy: 0.002); XCTAssertEqual(skips.count, 1)
+        skips = []; errors = []
+        player.start(session: id, origin: .system)
+        try await until({ player.state == .ended })
+        XCTAssertEqual(player.position, 0.35, accuracy: 0.002)
+        XCTAssertTrue(skips.isEmpty); XCTAssertTrue(errors.contains { $0.contains("gap") })
+    }
+
 }

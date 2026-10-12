@@ -47,3 +47,7 @@ extern "C" void nagi_vad_free(void *handle) {
     transcribe_model_free(g->model);
     delete g;
 }
+extern "C" void nagi_vad_reset(void *handle) {
+    auto *g = static_cast<Gate *>(handle);
+    if (g) transcribe_vad_stream_reset(g->session);
+}

@@ -14,6 +14,7 @@ public final class SpeechVAD {
     private let handle: UnsafeMutableRawPointer
     private let score: Score
     private let free: Free
+    private let resetState: Free
     public init(project: URL) throws {
         guard
             let lib = dlopen(
@@ -24,7 +25,7 @@ public final class SpeechVAD {
             )
         }
         guard let c = dlsym(lib, "nagi_vad_create"), let s = dlsym(lib, "nagi_vad_score"),
-            let f = dlsym(lib, "nagi_vad_free")
+            let f = dlsym(lib, "nagi_vad_free"), let r = dlsym(lib, "nagi_vad_reset")
         else {
             dlclose(lib); throw JournalError("Speech detector has an incompatible version.")
         }
@@ -39,9 +40,10 @@ public final class SpeechVAD {
             )
         }
         library = lib; handle = instance; score = unsafeBitCast(s, to: Score.self);
-        free = unsafeBitCast(f, to: Free.self)
+        free = unsafeBitCast(f, to: Free.self); resetState = unsafeBitCast(r, to: Free.self)
     }
     deinit { free(handle); dlclose(library) }
+    public func reset() { resetState(handle) }
     public func probability(_ samples: [Float]) throws -> Float {
         guard samples.count == 512 else { throw JournalError("Invalid speech detector frame") }
         let p = samples.withUnsafeBufferPointer { score(handle, $0.baseAddress!) }
@@ -58,6 +60,11 @@ public final class SpeechVAD {
 public final class SpeechGate {
     public struct Block { public let buffer: AVAudioPCMBuffer; public let offset: Double }
     private let score: ([Float]) throws -> Float
+    private var channelScore: (([Float], Int) throws -> Float)?
+    private var resetScore: (() -> Void)?
+    private var lastInputEnd = 0.0
+    private var pendingOffset = 0.0
+    private var epochStarted = false
     private var pending: AVAudioPCMBuffer?
     private var pendingCount = 0
     private var inputFrames: Int64 = 0
@@ -72,16 +79,35 @@ public final class SpeechGate {
     public var onKeep: ((AVAudioPCMBuffer, Double) throws -> Void)?
     public var onClose: ((Double) throws -> Void)?
     public var onGap: ((Double, Double) throws -> Void)?
+    public var onDiscontinuity: ((Double, Double) throws -> Void)?
     public var onActivity: ((Bool) -> Void)?
     public private(set) var peakBufferedFrames = 0
     public init(score: @escaping ([Float]) throws -> Float) { self.score = score }
     public convenience init(vad: SpeechVAD) { self.init(score: { try vad.probability($0) }) }
-    public var duration: Double { Double(inputFrames) / (format?.sampleRate ?? 1) }
+    /// One recurrent state per channel. Keep all original channels if any detects speech.
+    public convenience init(project: URL) throws {
+        var detectors = [try SpeechVAD(project: project)]
+        self.init(score: { try detectors[0].probability($0) })
+        channelScore = { samples, channel in
+            while detectors.count <= channel { detectors.append(try SpeechVAD(project: project)) }
+            return try detectors[channel].probability(samples)
+        }
+        resetScore = { for detector in detectors { detector.reset() } }
+    }
+    public convenience init(
+        channelScore: @escaping ([Float], Int) throws -> Float, reset: @escaping () -> Void = {}
+    ) {
+        self.init(score: { try channelScore($0, 0) })
+        self.channelScore = channelScore
+        resetScore = reset
+    }
+    public var confirmedOmissionEnd: Double { reportedEnd }
+    public var duration: Double { lastInputEnd }
     private func length(_ index: Int64) -> Int {
         let rate = format!.sampleRate
         return Int(floor(Double(index + 1) * rate * 0.032) - floor(Double(index) * rate * 0.032))
     }
-    public func feed(_ buffer: AVAudioPCMBuffer) throws {
+    public func feed(_ buffer: AVAudioPCMBuffer, at offset: Double? = nil) throws {
         guard !finished else { throw JournalError("Speech gate already finalized") }
         if format == nil {
             guard buffer.format.commonFormat == .pcmFormatFloat32, buffer.format.sampleRate >= 8000,
@@ -96,23 +122,38 @@ public final class SpeechGate {
         guard buffer.format == format else {
             throw JournalError("Input format changed; restart recording.")
         }
+        let position = offset ?? duration
+        guard position.isFinite, position >= 0 else {
+            throw JournalError("Invalid speech gate clock")
+        }
+        if epochStarted, abs(position - duration) > 0.02 {
+            let oldEnd = duration
+            try endEpoch()
+            try onDiscontinuity?(oldEnd, position)
+        }
+        if !epochStarted {
+            lastInputEnd = position; omittedStart = position; reportedEnd = position
+            epochStarted = true
+        }
         var consumed = 0
         while consumed < Int(buffer.frameLength) {
             let target = length(blockIndex)
             if pending == nil {
+                pendingOffset = position + Double(consumed) / format!.sampleRate
                 pending = AVAudioPCMBuffer(
                     pcmFormat: format!, frameCapacity: AVAudioFrameCount(target))!
             }
             let n = min(target - pendingCount, Int(buffer.frameLength) - consumed)
             copy(buffer, from: consumed, to: pending!, at: pendingCount, count: n)
             consumed += n; pendingCount += n; inputFrames += Int64(n)
+            lastInputEnd = position + Double(consumed) / format!.sampleRate
             if pendingCount == target {
                 let block = pending!; block.frameLength = AVAudioFrameCount(target)
                 pending = nil; pendingCount = 0
                 try process(
                     Block(
                         buffer: block,
-                        offset: Double(inputFrames - Int64(target)) / format!.sampleRate))
+                        offset: pendingOffset))
                 blockIndex += 1
             }
         }
@@ -143,15 +184,32 @@ public final class SpeechGate {
             var energy: Float = 0; for i in 0..<n { let x = sample(c, i); energy += x * x }
             if energy > power { power = energy; chosen = c }
         }
-        var mono = [Float](repeating: 0, count: 512)
-        for i in 0..<512 {
-            let x = Double(i) * Double(n) / 512; let lo = min(n - 1, Int(x));
-            let hi = min(n - 1, lo + 1)
-            mono[i] =
-                sample(chosen, lo) + Float(x - Double(lo))
-                * (sample(chosen, hi) - sample(chosen, lo))
+        func mono(_ channel: Int) -> [Float] {
+            var result = [Float](repeating: 0, count: 512)
+            for i in 0..<512 {
+                let x = Double(i) * Double(n) / 512
+                let lo = min(n - 1, Int(x)), hi = min(n - 1, lo + 1)
+                result[i] =
+                    sample(channel, lo) + Float(x - Double(lo))
+                    * (sample(channel, hi) - sample(channel, lo))
+            }
+            return result
         }
-        let p = try score(mono)
+        var p: Float = 0
+        if let channelScore {
+            for channel in 0..<channels {
+                let value = try channelScore(mono(channel), channel)
+                guard value.isFinite, value >= 0, value <= 1 else {
+                    throw JournalError("Invalid channel speech probability")
+                }
+                p = max(p, value)
+            }
+        } else {
+            p = try score(mono(chosen))
+        }
+        guard p.isFinite, p >= 0, p <= 1 else {
+            throw JournalError("Invalid speech detection probability")
+        }
         let end = block.offset + Double(n) / buffer.format.sampleRate
         if p >= (saving ? 0.20 : 0.35) { lastSpeechEnd = end }
         if !saving && p >= 0.35 {
@@ -179,14 +237,13 @@ public final class SpeechGate {
             peakBufferedFrames, preRoll.reduce(0) { $0 + Int($1.buffer.frameLength) } + pendingCount
         )
     }
-    public func finish() throws {
-        guard !finished else { return }; finished = true
+    private func flushEpoch() throws {
         if let pending, pendingCount > 0 {
             let count = pendingCount
             pending.frameLength = AVAudioFrameCount(count)
             self.pending = nil; pendingCount = 0
             try process(
-                Block(buffer: pending, offset: duration - Double(count) / format!.sampleRate)
+                Block(buffer: pending, offset: pendingOffset)
             )
         }
         if saving {
@@ -195,5 +252,17 @@ public final class SpeechGate {
             try onGap?(omittedStart, duration)
         }
         preRoll.removeAll(); saving = false
+    }
+    public func endEpoch() throws {
+        guard !finished else { throw JournalError("Speech gate already finalized") }
+        try flushEpoch()
+        pending = nil; pendingCount = 0; inputFrames = 0; blockIndex = 0
+        lastSpeechEnd = -.infinity; epochStarted = false
+        resetScore?()
+    }
+    public func finish() throws {
+        guard !finished else { return }
+        finished = true
+        try flushEpoch()
     }
 }

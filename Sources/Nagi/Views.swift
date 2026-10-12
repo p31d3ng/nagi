@@ -503,7 +503,7 @@ struct ContentView: View {
                     .disabled(j.recording || j.captureBusy)
                     .onChange(of: j.includeSystemAudio) { _, _ in j.saveSystemAudio() }
                 Text(
-                    "Off by default. Records computer playback alongside your selected microphone in separate continuous tracks. Voice enrollment uses the microphone only. Both sources must start successfully; no silent fallback."
+                    "Off by default. Records computer playback alongside your selected microphone in separate tracks using your Storage saving mode. Voice enrollment uses the microphone only. Both sources must start successfully; no silent fallback."
                 )
                 .font(.callout).foregroundStyle(.secondary)
                 Label(
@@ -524,7 +524,7 @@ struct ContentView: View {
                 )
                 .font(.caption).foregroundStyle(.secondary)
                 Text(
-                    "Dual-source audio is saved continuously; speech-only storage savings do not apply. If transcript summaries are enabled, both tracks' text can be shared. Source and echo hints stay local, so review possible duplication yourself."
+                    "Speech-only saving detects each track independently and keeps all stereo channels when either contains speech. Choose Continuous in Storage to preserve faint speech, music and every sound. If transcript summaries are enabled, both tracks' text can be shared. Source and echo hints stay local, so review possible duplication yourself."
                 )
                 .font(.caption).foregroundStyle(.secondary)
                 Toggle("Prevent idle system sleep while recording", isOn: $j.keepAwake)
@@ -615,7 +615,7 @@ struct ContentView: View {
                 .disabled(j.recording || j.captureBusy)
                 .onChange(of: j.savingMode) { _, _ in j.saveSavingMode() }
                 Text(
-                    "Speech only uses a local speech detector with one second before/after speech. Long non-speech intervals are omitted; original elapsed timestamps remain. Noise can occasionally trigger saving, and faint/distant speech may be missed. Choose Continuous to preserve every sound. Existing audio is unchanged; guided enrollment and imports use continuous audio."
+                    "Speech only uses a local speech detector with one second before/after speech. Long non-speech intervals are omitted; original elapsed timestamps remain. Noise can occasionally trigger saving, and faint/distant speech may be missed. Choose Continuous to preserve every sound. This mode applies to the microphone and system audio independently on new recordings; changing it never alters an active session or existing audio. Short replies, faint/distant voices and speech beside music may be missed. Guided enrollment and imports use continuous audio."
                 )
                 .font(.callout).foregroundStyle(.secondary)
                 Text(
@@ -708,8 +708,12 @@ struct CaptureStatusBar: View {
     private var statusInfo: some View {
         HStack(spacing: 16) {
             if j.recording && j.includeSystemAudio && !j.enrollment {
-                ProgressView(value: j.systemLevel).frame(width: 60)
-                    .accessibilityLabel("System audio level")
+                VStack {
+                    Text(j.systemSavingSpeech ? "System · saving" : "System · listening")
+                        .font(.caption)
+                    ProgressView(value: j.systemLevel).frame(width: 60)
+                }
+                .accessibilityLabel("System audio level")
             }
             Circle().fill(j.recording ? .red : j.captureStarting ? .orange : accent)
                 .frame(width: 12, height: 12)

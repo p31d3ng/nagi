@@ -95,7 +95,9 @@ import Foundation
                     )
                 }
                 if item.offset > offset + 0.02 {
-                    if store.isOmittedSilence(session: session, start: offset, end: item.offset) {
+                    if AudioSources.omitted(
+                        store, session: session, origin: origin, start: offset, end: item.offset)
+                    {
                         DispatchQueue.main.async { [weak self] in
                             guard let self, self.generation == token else { return }
                             self.onSkippedSilence?(

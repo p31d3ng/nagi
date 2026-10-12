@@ -152,6 +152,85 @@ do {
             "GATE-RESULT " + String(
                 data: try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys]),
                 encoding: .utf8)!)
+    case "dual-gate":
+        guard args.count >= 7 else {
+            throw JournalError(
+                "dual-gate DATA MIC SYSTEM PROJECT speechOnly|continuous [crash-at-seconds]")
+        }
+        let speechOnly = args[6] == "speechOnly",
+            crashAt = args.count > 7 ? Double(args[7]) ?? -1 : -1
+        let realtime = args.count > 8 && args[8] == "realtime"
+        let project = URL(fileURLWithPath: args[5])
+        let id = try store.createSession(
+            title: "Synthetic dual gating", device: "generated fixture", model: "unified")
+        let origins: [AudioOrigin] = [.microphone, .system]
+        let writers = origins.map {
+            ChunkWriter(store: store, session: id, model: "unified", origin: $0, hostAnchor: 0)
+        }
+        let inputs = try [args[3], args[4]]
+            .map { try AVAudioFile(forReading: URL(fileURLWithPath: $0)) }
+        for i in 0..<2 {
+            if speechOnly { try writers[i].enableSpeechOnly(gate: SpeechGate(project: project)) }
+            try AudioSources.status(store, session: id, origin: origins[i], status: "recording")
+        }
+        let buffers = inputs.map {
+            AVAudioPCMBuffer(pcmFormat: $0.processingFormat, frameCapacity: 4096)!
+        }
+        let start = Date(), cpuStart = clock()
+        while inputs.contains(where: { $0.framePosition < $0.length }) {
+            for i in 0..<2 where inputs[i].framePosition < inputs[i].length {
+                let offset = Double(inputs[i].framePosition) / inputs[i].processingFormat.sampleRate
+                try inputs[i].read(into: buffers[i])
+                if realtime {
+                    guard writers[i].enqueue(buffers[i], at: offset, clock: "host") else {
+                        throw JournalError("Synthetic real-time writer refused input")
+                    }
+                } else {
+                    try writers[i].write(buffers[i], at: offset, clock: "host")
+                }
+                if crashAt >= 0 && offset >= crashAt { fflush(stdout); _exit(75) }
+            }
+            if realtime {
+                let progress =
+                    inputs.map { Double($0.framePosition) / $0.processingFormat.sampleRate }.max()
+                    ?? 0
+                let wait = progress - Date().timeIntervalSince(start)
+                if wait > 0 { Thread.sleep(forTimeInterval: min(0.1, wait)) }
+            }
+        }
+        for i in 0..<2 {
+            try writers[i].finish();
+            try AudioSources.status(store, session: id, origin: origins[i], status: "finished")
+        }
+        try store.finish(id)
+        let writeWall = Date().timeIntervalSince(start),
+            cpu = Double(clock() - cpuStart) / Double(CLOCKS_PER_SEC)
+        let compression = Date()
+        for chunk in try store.chunks(session: id) { try Archive.compress(chunk, store: store) }
+        let rows = try store.exec(
+            "SELECT s.origin,SUM(c.duration) AS saved,SUM(cast(c.duration*48000 as INTEGER)) AS frames FROM chunks c JOIN chunk_sources s ON s.chunk=c.id WHERE c.session=? GROUP BY s.origin",
+            [id])
+        let bytes = try store.chunks(session: id)
+            .reduce(0) { n, c in
+                n
+                    + ((try
+                        FileManager.default
+                        .attributesOfItem(atPath: Archive.readable(c, store: store).path)[.size]
+                        as? Int) ?? 0)
+            }
+        let result: [String: Any] = [
+            "mode": args[6], "session": id, "write_vad_wall_s": writeWall, "cpu_s": cpu,
+            "compression_wall_s": Date().timeIntervalSince(compression), "audio_bytes": bytes,
+            "sources": rows, "chunks": try store.chunks(session: id).count,
+            "input_seconds": inputs.map { Double($0.length) / $0.processingFormat.sampleRate },
+            "gaps": try store.exec(
+                "SELECT origin,start,end,reason FROM source_gaps WHERE session=? ORDER BY origin,start",
+                [id]),
+        ]
+        print(
+            "DUAL-GATE-RESULT " + String(
+                data: try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]),
+                encoding: .utf8)!)
     case "dual-source":
         guard args.count >= 6 else {
             throw JournalError(

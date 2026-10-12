@@ -211,6 +211,33 @@ public enum Archive {
                     reason: "crash_unfinalized")
             }
         }
+        for row in try store.exec(
+            "SELECT p.* FROM source_progress p JOIN sessions s ON s.id=p.session WHERE s.status='interrupted'"
+        ) {
+            guard let session = row["session"],
+                let origin = AudioOrigin(rawValue: row["origin"] ?? ""),
+                let progress = Double(row["end"] ?? "")
+            else { continue }
+            let kept =
+                Double(
+                    try store
+                        .exec(
+                            "SELECT COALESCE(MAX(offset+duration),0) AS end FROM chunks WHERE session=? AND "
+                                + AudioSources.sameOriginSQL, [session, origin.rawValue]
+                        )
+                        .first?["end"] ?? "0") ?? 0
+            let omitted =
+                Double(
+                    try store
+                        .exec(
+                            "SELECT COALESCE(MAX(end),0) AS end FROM source_gaps WHERE session=? AND origin=? AND reason='omitted_nonspeech'",
+                            [session, origin.rawValue]
+                        )
+                        .first?["end"] ?? "0") ?? 0
+            try AudioSources.gap(
+                store, session: session, origin: origin, start: max(kept, omitted), end: progress,
+                reason: "crash_unfinalized")
+        }
         let known = Set(try store.chunksWithAudio().map(\.path))
         for url in try FileManager.default.contentsOfDirectory(
             at: store.root.appendingPathComponent("audio"), includingPropertiesForKeys: nil)
@@ -330,6 +357,7 @@ public final class ChunkWriter: @unchecked Sendable {
     public let origin: AudioOrigin
     public let hostAnchor: Double?
     private var expectedEnd = 0.0
+    private var savedEnd = 0.0
     private var chunkClock = "frames"
     private var file: AVAudioFile?
     private var chunkID = ""
@@ -380,18 +408,28 @@ public final class ChunkWriter: @unchecked Sendable {
             try self?.closeChunk(); self?.onSpanEnded?(end)
         }
         gate.onGap = { [weak self] start, end in
-            guard let self else { return };
-            let first = try self.store
-                .exec(
-                    "SELECT 1 FROM audio_gaps WHERE session=? AND start=?", [self.session, start]
-                )
-                .isEmpty
-            try self.store.recordGap(session: self.session, start: start, end: end)
-            if first { self.onChunk?() }
+            guard let self else { return }
+            if self.origin == .legacy {
+                try self.store.recordGap(session: self.session, start: start, end: end)
+            } else {
+                try AudioSources.gap(
+                    self.store, session: self.session, origin: self.origin, start: start, end: end,
+                    reason: "omitted_nonspeech")
+            }
+            self.onChunk?()
+        }
+        gate.onDiscontinuity = { [weak self] start, end in
+            guard let self else { return }
+            try AudioSources.gap(
+                self.store, session: self.session, origin: self.origin, start: start, end: end,
+                reason: "clock_adjustment")
         }
         gate.onActivity = { [weak self] value in self?.onActivity?(value) }
         self.gate = gate
         try store.set("saving-" + session, AudioSavingMode.speechOnly.rawValue)
+        if origin != .legacy {
+            try AudioSources.progress(store, session: session, origin: origin, end: 0)
+        }
     }
     @discardableResult public func enqueue(
         _ buffer: AVAudioPCMBuffer, at offset: Double? = nil, clock: String = "frames"
@@ -460,12 +498,13 @@ public final class ChunkWriter: @unchecked Sendable {
             throw JournalError("Audio clock moved backwards; capture stopped honestly.")
         }
         if offset != nil, abs(position - expectedEnd) > 0.02 {
+            try gate?.endEpoch()
             try closeChunk()
             try AudioSources.gap(
                 store, session: session, origin: origin, start: expectedEnd, end: position,
                 reason: "capture_timestamp_gap")
         }
-        if file != nil, chunkClock != clock { try closeChunk() }
+        if total > 0, chunkClock != clock { try gate?.endEpoch(); try closeChunk() }
         chunkClock = clock
         if let data = buffer.floatChannelData {
             var peak = 0.0
@@ -483,7 +522,16 @@ public final class ChunkWriter: @unchecked Sendable {
             onLevel?(peak)
         }
         if let gate {
-            try gate.feed(buffer)
+            do { try gate.feed(buffer, at: position) } catch {
+                expectedEnd = position + Double(buffer.frameLength) / inputRate
+                admission.lock(); capturedDuration = expectedEnd; admission.unlock()
+                try? AudioSources.gap(
+                    store, session: session, origin: origin,
+                    start: max(savedEnd, gate.confirmedOmissionEnd), end: expectedEnd,
+                    reason: "detector_or_write_failure")
+                try? recordProgress()
+                throw error
+            }
         } else {
             try writeSaved(buffer, at: position)
         }
@@ -491,9 +539,7 @@ public final class ChunkWriter: @unchecked Sendable {
         expectedEnd = position + Double(buffer.frameLength) / inputRate
         admission.lock(); capturedDuration = expectedEnd; admission.unlock()
         if gate != nil, capturedDuration - lastProgress >= 1 {
-            try store.exec(
-                "INSERT OR REPLACE INTO capture_progress VALUES(?,?,?)",
-                [session, capturedDuration, "speechOnly"])
+            try recordProgress()
             lastProgress = capturedDuration
         }
     }
@@ -542,6 +588,7 @@ public final class ChunkWriter: @unchecked Sendable {
         try file!.write(from: buffer)
         onWritten?(buffer, offset)
         frames += Int64(buffer.frameLength)
+        savedEnd = max(savedEnd, offset + Double(buffer.frameLength) / rate)
         if Double(frames) / rate >= 10 { try closeChunk() }
     }
     private func closeChunk() throws {
@@ -555,6 +602,16 @@ public final class ChunkWriter: @unchecked Sendable {
         try store.seal(chunkID, duration: Double(frames) / rate)
         onChunk?()
     }
+    private func recordProgress() throws {
+        if origin == .legacy {
+            try store.exec(
+                "INSERT OR REPLACE INTO capture_progress VALUES(?,?,?)",
+                [session, capturedDuration, "speechOnly"])
+        } else {
+            try AudioSources.progress(
+                store, session: session, origin: origin, end: capturedDuration)
+        }
+    }
     public func finish() throws {
         admission.lock(); stopped = true; admission.unlock()
         var thrown: Error?
@@ -564,9 +621,7 @@ public final class ChunkWriter: @unchecked Sendable {
             do { try closeChunk() } catch { if thrown == nil { thrown = error } }
             do {
                 if gate != nil {
-                    try store.exec(
-                        "INSERT OR REPLACE INTO capture_progress VALUES(?,?,?)",
-                        [session, capturedDuration, "speechOnly"])
+                    try recordProgress()
                 }
             } catch { if thrown == nil { thrown = error } }
         }

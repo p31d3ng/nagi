@@ -23,6 +23,9 @@ public enum AudioSources {
     }
     public static func install(_ store: Store) throws {
         try store.exec(
+            "CREATE TABLE IF NOT EXISTS source_progress(session TEXT REFERENCES sessions(id) ON DELETE CASCADE,origin TEXT,end REAL,mode TEXT,PRIMARY KEY(session,origin))"
+        )
+        try store.exec(
             "CREATE TABLE IF NOT EXISTS chunk_sources(chunk TEXT PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,origin TEXT NOT NULL,clock TEXT NOT NULL)"
         )
         try store.exec(
@@ -58,6 +61,40 @@ public enum AudioSources {
         try store.exec(
             "INSERT OR REPLACE INTO source_gaps VALUES(?,?,?,?,?)",
             [session, origin.rawValue, start, end, reason])
+    }
+    public static func progress(_ store: Store, session: String, origin: AudioOrigin, end: Double)
+        throws
+    {
+        try store.exec(
+            "INSERT OR REPLACE INTO source_progress VALUES(?,?,?,?)",
+            [session, origin.rawValue, end, "speechOnly"])
+    }
+    public static func omitted(
+        _ store: Store, session: String, origin: AudioOrigin, start: Double, end: Double
+    ) -> Bool {
+        if origin == .legacy {
+            return store.isOmittedSilence(session: session, start: start, end: end)
+        }
+        let hasSourceMode =
+            ((try? store.exec(
+                "SELECT 1 FROM source_progress WHERE session=? AND origin=?",
+                [session, origin.rawValue]
+            )
+            .isEmpty) == false)
+        if !hasSourceMode, origin == .microphone,
+            ((try? store.exec(
+                "SELECT 1 FROM source_status WHERE session=? AND origin='system'", [session]
+            )
+            .isEmpty) == true)
+        {
+            return store.isOmittedSilence(session: session, start: start, end: end)
+        }
+        return
+            ((try? store.exec(
+                "SELECT 1 FROM source_gaps WHERE session=? AND origin=? AND start<=? AND end>=? AND reason='omitted_nonspeech' LIMIT 1",
+                [session, origin.rawValue, start + 0.002, end - 0.002]
+            )
+            .isEmpty) == false)
     }
     public static func echo(_ store: Store, chunk: String) -> Bool {
         ((try? store.exec(

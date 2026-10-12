@@ -136,3 +136,5 @@ Nagi 0.4.3 adds the input picker beside Start recording, synchronized with Setti
 Nagi 0.4.4 makes the full navigation row clickable, including trailing whitespace, and explicitly allows activation clicks on navigation buttons. Live-page database reads run off the main actor with bounded coalescing. See [evidence and limits](NAVIGATION.md).
 
 Optional system audio (0.5.0): enable it in Settings → Devices, grant access explicitly, and start with your selected microphone. Sources stay separate through recording, transcription and playback. See [SYSTEM_AUDIO.md](SYSTEM_AUDIO.md) for behavior, synthetic tests, resource measurements and untested hardware limits.
+
+In 0.6.0, the existing Storage saving preference applies independently to microphone and system audio on new recordings. Continuous remains selectable. See [DUAL_SPEECH_ONLY.md](DUAL_SPEECH_ONLY.md) for timestamp/recovery behavior, tests and measured savings.

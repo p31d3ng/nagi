@@ -8,7 +8,7 @@ public enum EchoAnalyzer {
         guard origin == .microphone || origin == .system else { return }
         let opposite = origin == .microphone ? AudioOrigin.system : .microphone
         let peers = try store.exec(
-            "SELECT chunks.id FROM chunks JOIN chunk_sources s ON s.chunk=chunks.id WHERE session=? AND s.origin=? AND s.clock='host' AND status!='writing' AND offset<? AND offset+duration>? ORDER BY offset LIMIT 3",
+            "SELECT chunks.id FROM chunks JOIN chunk_sources s ON s.chunk=chunks.id WHERE session=? AND s.origin=? AND s.clock='host' AND status!='writing' AND offset<? AND offset+duration>? ORDER BY offset LIMIT 16",
             [chunk.session, opposite.rawValue, chunk.offset + chunk.duration, chunk.offset])
         guard
             (try store.exec("SELECT clock FROM chunk_sources WHERE chunk=?", [chunk.id]).first?[
