@@ -26,8 +26,15 @@ public final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegat
         self.permission = permission
         super.init()
     }
-    private func attach(_ writer: ChunkWriter) {
-        lock.lock(); self.writer = writer; stopped = false; lock.unlock()
+    private func attach(_ writer: ChunkWriter) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !stopped else { return false }
+        self.writer = writer
+        return true
+    }
+    private func isClosed() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return stopped
     }
     private let lane = DispatchQueue(label: "nagi.system.audio", qos: .userInitiated)
     private var stream: SCStream?
@@ -36,6 +43,8 @@ public final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegat
     private var stopped = false
     public var onError: ((String) -> Void)?
     public func prepare() async throws {
+        try Task.checkCancellation()
+        guard !isClosed() else { throw CancellationError() }
         guard permission() else {
             throw JournalError(
                 "System audio permission is missing. Request it explicitly in Settings → Devices, then check again. No recording started."
@@ -43,6 +52,7 @@ public final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegat
         }
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: true)
+        try Task.checkCancellation()
         guard let display = content.displays.first else {
             throw JournalError(
                 "No display available for the system audio stream. Connect a display and retry.")
@@ -56,9 +66,13 @@ public final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegat
         self.stream = stream
     }
     public func start(writer: ChunkWriter) async throws {
+        try Task.checkCancellation()
+        guard !isClosed() else { throw CancellationError() }
         guard let stream else { throw JournalError("System audio stream has not been prepared") }
-        attach(writer)
+        guard attach(writer) else { throw CancellationError() }
+        try Task.checkCancellation()
         try await stream.startCapture()
+        try Task.checkCancellation()
     }
     /// Close admission synchronously before finalizing files. Late callbacks cannot append.
     public func close() {

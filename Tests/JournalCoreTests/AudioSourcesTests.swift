@@ -134,6 +134,25 @@ final class AudioSourcesTests: XCTestCase {
         XCTAssertTrue(c.capturesAudio); XCTAssertFalse(c.captureMicrophone)
         XCTAssertTrue(c.excludesCurrentProcessAudio); XCTAssertEqual(c.queueDepth, 3)
     }
+    func testCancelledStartupCannotReopenAdmissionOrRequestPermission() async throws {
+        var permissionReads = 0
+        let capture = SystemAudioCapture(permission: {
+            permissionReads += 1; return false
+        })
+        capture.close()
+        do { try await capture.prepare(); XCTFail("Closed startup must remain closed") } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        let id = try session()
+        let writer = ChunkWriter(store: store, session: id, model: "unified", origin: .system)
+        do {
+            try await capture.start(writer: writer);
+            XCTFail("Cancelled startup cannot attach a writer")
+        } catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(permissionReads, 0)
+        await capture.stop(); try writer.finish()
+        XCTAssertTrue(try store.chunks(session: id).isEmpty)
+    }
     func testSystemPCMAdapterCopiesSamplesAndRejectsOversize() throws {
         let b = buffer(1600, channels: 2)
         var desc: CMAudioFormatDescription?

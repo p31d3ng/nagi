@@ -18,7 +18,8 @@ The system track retains SCK's configured 48 kHz stereo Float32 samples, not a c
 about the physical output device's original sample rate. The microphone retains its
 native input rate/channels. Each source has its own losslessly gzip-compressed CAFs.
 
-Both sources must start successfully. Preparing can be cancelled; denied permission,
+Both sources must start successfully. Preparing can be cancelled; Cancel closes admission immediately and a late SCK
+startup cannot reopen it. Denied permission,
 missing display/device, buffer/clock errors or an SCK interruption finalize/cancel
 both sources with an explanatory status. Admission closes and accepted buffers drain
 before finalization. Late callbacks cannot append. While SCK shutdown acknowledges,
@@ -70,8 +71,9 @@ No real summary requests occurred in these tests.
 
 ## Verification and limits
 
-109 unit/integration tests passed, zero failures, in 25.388 seconds on macOS
-26.6.2 (25G83), Xcode 26.6 (17F113), including shared timestamp validation. Tests cover denied permission without content enumeration,
+110 unit/integration tests passed, zero failures, in 25.820 seconds on macOS
+26.6.2 (25G83), Xcode 26.6 (17F113), including shared timestamp validation and interrupted startup refusing further
+admission/permission enumeration. Tests cover denied permission without content enumeration,
 SCK configuration/PCM copying, bounded oversize rejection, gaps/clock errors, late
 buffers after finish, source-isolated ASR context and playback/seek, source recovery,
 48-hour expiry/derived removal, preserved raw/corrected text, reversible hints,
@@ -86,7 +88,7 @@ file injection; it does not prove every simultaneous physical-capture crash case
 
 Two-source write stress injected 120.064 seconds per source (48 kHz microphone mono,
 system stereo), preserving all 5,763,072 frames per source across 26 chunks. Capture
-write wall time was 2.557 seconds and compression 1.919 seconds, combined RTF 0.037
+write wall time was 2.597 seconds and compression 1.874 seconds, combined RTF 0.037
 against concurrent session duration. Each live writer admits at most 64 buffers of
 8,192 frames; SCK admits at most stereo, while the microphone retains device channels.
 Inputs above 32 channels are refused explicitly. This bounds queued microphone

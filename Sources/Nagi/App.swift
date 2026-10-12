@@ -773,14 +773,23 @@ import SwiftUI
             writer = nil
             sessionID = nil
             recording = false
-            self.error = error.localizedDescription
+            if error is CancellationError {
+                self.error = nil
+                status = "Startup cancelled · any accepted audio was saved"
+            } else {
+                self.error = error.localizedDescription
+            }
             enrollment = false
         }
     }
     func stop(note: String = "") {
         guard !syntheticMonitor else { return }
         guard recording else {
-            if captureBusy { startTask?.cancel(); status = "Cancelling capture startup…" }
+            if captureBusy {
+                startTask?.cancel()
+                systemCapture?.close()
+                status = "Cancelling capture startup…"
+            }
             return
         }
         let stream = systemCapture

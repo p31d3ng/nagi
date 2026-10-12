@@ -707,7 +707,8 @@ struct CaptureStatusBar: View {
                 ProgressView(value: j.systemLevel).frame(width: 60)
                     .accessibilityLabel("System audio level")
             }
-            Circle().fill(j.recording ? .red : accent).frame(width: 12, height: 12)
+            Circle().fill(j.recording ? .red : j.captureStarting ? .orange : accent)
+                .frame(width: 12, height: 12)
             VStack(alignment: .leading, spacing: 5) {
                 Text(j.status).font(.headline)
                 Text(j.processing).font(.caption).foregroundStyle(.secondary)
