@@ -22,13 +22,23 @@ Tab actions only change view state. Settings performs no model load; Models chec
 local file presence. Timeline already uses lazy stacks. Live's page query had run
 synchronously on the main actor and could wait on the serialized database lock.
 That read now runs on one utility queue, with one active read and one latest pending
-request. Cancelled/outdated results cannot replace a newer session, and switching
+request. Same-page refreshes publish each completed read while coalescing further
+updates, so sustained revisions cannot starve the UI. Session/page changes invalidate
+old results. Cancelled/outdated results cannot replace a newer session, and switching
 away invalidates pending results. This removes that potential lock wait from the
-main actor; it does not claim to diagnose or eliminate all causes of sluggishness.
+main actor. Journal.refresh still reads metadata synchronously on MainActor through
+the shared Store lock and can wait under contention. This release does not claim
+to diagnose or eliminate all causes of sluggishness.
 
 ## Verification
 
-96 tests passed, zero failures, in 15.639 seconds. New tests cover stale-result
+The original navigation build passed 96 tests, zero failures, in 15.639 seconds.
+The final host-access rerun passed all 98 tests in 16.220 seconds, zero failures.
+A restricted run failed playback-service tests; the successful rerun used generated
+muted playback fixtures with host service access, without microphone capture.
+Two additional regression tests cover sustained same-page publication while
+updates arrive every 5 ms during a 50 ms read, and invalidation when changing the
+page boundary within a session. New tests also cover stale-result
 cancellation, bounded/coalesced reads and keeping the main actor responsive during
 an 80 ms simulated read. The test originally used fixed sleeps to await callbacks;
 it was changed to publication expectations to avoid timing assumptions.

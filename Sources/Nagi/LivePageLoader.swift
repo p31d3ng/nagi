@@ -11,11 +11,17 @@ import SwiftUI
     private var running = false
     private var pending: (Int, String, Double)?
     private var visibleSession = ""
+    private var visibleBefore = Double.greatestFiniteMagnitude
     private let read: @Sendable (String, Double) throws -> [LiveParagraph]
     init(read: @escaping @Sendable (String, Double) throws -> [LiveParagraph]) { self.read = read }
     func load(session: String, before: Double) {
-        generation += 1
-        if visibleSession != session { rows = []; visibleSession = session }
+        // Refreshes within the same page must not invalidate an active read: otherwise
+        // sustained revisions can starve publication forever. Only context changes cancel it.
+        if visibleSession != session || visibleBefore != before {
+            generation += 1
+            if visibleSession != session { rows = [] }
+            visibleSession = session; visibleBefore = before
+        }
         pending = (generation, session, before)
         runNext()
     }

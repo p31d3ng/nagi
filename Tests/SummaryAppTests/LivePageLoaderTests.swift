@@ -57,6 +57,58 @@ private final class ReadCount: @unchecked Sendable {
         await fulfillment(of: [completed], timeout: 3)
         XCTAssertEqual(loader.rows.first?.id, "new")
     }
+    func testSustainedSamePageUpdatesPublishPeriodicallyWithoutStarvation() async throws {
+        let calls = ReadCount()
+        let loader = LivePageLoader(read: { _, _ in
+            calls.increment()
+            let id = "read-\(calls.value)"
+            Thread.sleep(forTimeInterval: 0.05)
+            return [LiveParagraph(id: id, offset: 0, text: "Synthetic", detail: "Unknown")]
+        })
+        let completed = expectation(description: "Two reads published while updates continue")
+        var publications = 0
+        let subscription = loader.$rows.sink { rows in
+            if !rows.isEmpty {
+                publications += 1
+                if publications == 2 { completed.fulfill() }
+            }
+        }
+        defer { subscription.cancel(); loader.cancel() }
+        loader.load(session: "same", before: .greatestFiniteMagnitude)
+        let producer = Task { @MainActor in
+            while !Task.isCancelled {
+                loader.load(session: "same", before: .greatestFiniteMagnitude)
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+        }
+        await fulfillment(of: [completed], timeout: 2)
+        // The producer is still active here. Old behavior discarded every result.
+        XCTAssertGreaterThanOrEqual(publications, 2)
+        producer.cancel(); await producer.value
+        XCTAssertLessThan(calls.value, 10)
+    }
+    func testChangingPageBoundaryDiscardsOldPageResult() async throws {
+        let loader = LivePageLoader(read: { _, before in
+            Thread.sleep(forTimeInterval: 0.04)
+            return [
+                LiveParagraph(
+                    id: String(Int(before)), offset: before, text: "Synthetic", detail: "Unknown")
+            ]
+        })
+        let completed = expectation(description: "Requested page published")
+        var published: [String] = []
+        let subscription = loader.$rows.sink { rows in
+            if let id = rows.first?.id {
+                published.append(id)
+                if id == "500" { completed.fulfill() }
+            }
+        }
+        defer { subscription.cancel(); loader.cancel() }
+        loader.load(session: "same", before: 1000)
+        loader.load(session: "same", before: 500)
+        await fulfillment(of: [completed], timeout: 2)
+        XCTAssertEqual(published, ["500"])
+    }
     func testLargeSyntheticDocumentPageProfile() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
