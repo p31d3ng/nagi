@@ -22,6 +22,7 @@ import SwiftUI
 }
 @MainActor final class Journal: ObservableObject {
     let meter = CaptureMeter()
+    let microphonePermission = MicrophonePermission()
     var level: Double {
         get { meter.level }
         set { meter.level = newValue }
@@ -211,6 +212,11 @@ import SwiftUI
                 self?.processor.maintenance()
                 self?.status = "Awake · recording needs an explicit start"
             }
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.microphonePermission.refresh() }
         }
         NotificationCenter.default.addObserver(
             forName: Notification.Name("NagiQuit"), object: nil, queue: .main
@@ -475,28 +481,30 @@ import SwiftUI
                 "Choose a connected input device in Devices. Recording never falls back to another microphone."
             return
         }
-        enrollment = enroll
-        let begin = { [weak self] in
-            Task { @MainActor in self?.begin(device: device, enroll: enroll) }
-        }
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .authorized: begin()
-        case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .audio) { [weak self] allowed in
-                if allowed {
-                    begin()
-                } else {
-                    DispatchQueue.main.async {
-                        self?.error =
-                            "Microphone permission was declined. Enable Nagi in System Settings → Privacy & Security → Microphone, then try again."
-                    }
-                }
-            }
-        default:
+        microphonePermission.refresh()
+        guard !microphonePermission.requesting else {
             error =
-                "Microphone access is unavailable. Enable Nagi in System Settings → Privacy & Security → Microphone."
+                "Waiting for the macOS microphone permission decision. Recording has not started."
+            return
+        }
+        microphonePermission.request { [weak self] allowed in
+            guard let self else { return }
+            guard allowed else {
+                self.error = self.microphonePermission.explanation
+                return
+            }
+            // Device selection may change while the system permission dialog is open.
+            guard !self.recording, self.inputUID == device.id,
+                Devices.inputs().contains(where: { $0.id == device.id })
+            else {
+                self.error =
+                    "Selected input changed or disconnected. Select it in Devices and start again."
+                return
+            }
+            self.begin(device: device, enroll: enroll)
         }
     }
+
     private func begin(device: InputDevice, enroll: Bool) {
         stopPlayback()
         do {

@@ -116,3 +116,7 @@ The controller samples process RSS/CPU, queue counts and storage, saves bounded 
 The v0.1.2 investigation and verified two-hour results are in [MEMORY_PROFILE.md](MEMORY_PROFILE.md). Timeline indexes avoid sorting an entire large conversation to display the bounded 2,000-row result.
 
 For a generated 100,000-row UI capacity control without microphone or ML: `python3 scripts/ui-memory.py 100000 300`. Test bundles retain their mode and isolated data path in Info.plist when reopened.
+
+## Microphone permission check
+
+Nagi 0.4.1 adds **Settings → Permissions** with the actual macOS microphone status, an explicit first-access request, read-only refresh on activation, and recovery instructions. Device connection is shown separately. See [permission behavior and repeated-prompt investigation](PERMISSIONS.md). Development builds remain ad-hoc signed; this UI does not guarantee permission persistence across rebuilds.

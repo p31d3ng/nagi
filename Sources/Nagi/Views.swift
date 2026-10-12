@@ -370,6 +370,10 @@ struct ContentView: View {
             Text(section).font(.largeTitle.weight(.semibold))
             switch section {
             case "Settings":
+                PermissionsView(
+                    permission: j.microphonePermission,
+                    inputConnected: j.devices.contains { $0.id == j.inputUID },
+                    hasInputs: !j.devices.isEmpty, requestsDisabled: j.syntheticMonitor)
                 SummarySettingsView(controller: j.summaries)
                 Divider()
                 Text("Customize your journal").font(.title2)
